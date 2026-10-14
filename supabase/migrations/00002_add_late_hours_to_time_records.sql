@@ -1,0 +1,1 @@
+ALTER TABLE time_records ADD COLUMN IF NOT EXISTS late_hours numeric(4,1) NOT NULL DEFAULT 0;
