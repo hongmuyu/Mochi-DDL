@@ -1,0 +1,75 @@
+# ==========================================
+# Dependencies
+# ==========================================
+node_modules/
+.pnpm-store/
+
+# ==========================================
+# Expo & Native Builds
+# ==========================================
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+/ios
+/android
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.apk
+*.aab
+
+# ==========================================
+# Metro Bundler & Cache
+# ==========================================
+.metro-health-check*
+.metro-cache/
+.native-wind-cache/
+.native-wind-cache
+.vite
+
+# ==========================================
+# Environment Variables & Secrets (CRITICAL)
+# ==========================================
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# Logs & System Files
+# ==========================================
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+.DS_Store
+*.pem
+*.tsbuildinfo
+
+# ==========================================
+# Platform Internal / Cache / Non-deliverables
+# ==========================================
+.skills/
+.skills
+historical_context.txt
+history/
+history/*.json
+.claude/
+output/
+output.tar.gz
+.sync
+package.json.[0-9]*
+tasks/
+
+# ==========================================
+# Internal working docs (not for public repo)
+# ==========================================
+V1_FUNCTION_CHECKLIST.md
+V1_RELEASE_REPORT.md
+UI_FUNCTION_AUDIT_REPORT.md
+ANDROID_MANUAL_TEST.md
+docs/

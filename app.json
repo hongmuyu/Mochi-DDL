@@ -1,0 +1,86 @@
+{
+  "expo": {
+    "name": "麻糬のDDL",
+    "slug": "ddlife-ddl-simulator",
+    "version": "1.0.86",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "buildNumber": "1",
+      "bundleIdentifier": "com.miaoda.appbmlmo7hbv9c1"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A0A0C"
+      },
+      "predictiveBackGestureEnabled": false,
+      "versionCode": 1,
+      "package": "com.miaoda.appbmlmo7hbv9c1",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-asset",
+      "expo-sqlite",
+      "expo-font",
+      "expo-system-ui",
+      "expo-audio",
+      "expo-file-system",
+      "expo-document-picker",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "允许 DDLife 访问相册以保存生存日报截图",
+          "savePhotosPermission": "允许 DDLife 保存截图到相册"
+        }
+      ],
+      "@react-native-async-storage/expo-with-async-storage",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#FF5E7C",
+          "defaultChannel": "default",
+          "iosDisplayInForeground": true,
+          "iosPermissions": [
+            "Alert",
+            "Badge",
+            "Sound"
+          ]
+        }
+      ],
+      "expo-sharing",
+      "expo-image",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "scheme": "appbmlmo7hbv9c1",
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "7a24c4e7-90f4-4610-9d59-aaac27006dd8"
+      }
+    }
+  }
+}
