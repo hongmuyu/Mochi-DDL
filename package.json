@@ -63,7 +63,7 @@
     "expo-status-bar": "~55.0.4",
     "expo-system-ui": "~55.0.9",
     "lucide-react-native": "^1.11.0",
-    "miaoda-expo-devkit": "0.1.1-beta.116",
+    "miaoda-expo-devkit": "0.1.1-beta.119",
     "nativewind": "^4.2.3",
     "react": "19.2.0",
     "react-dom": "19.2.0",
@@ -103,8 +103,7 @@
       "expo@55.0.6": "patches/expo@55.0.6.patch"
     },
     "configDependencies": {
-      "miaoda-expo-devkit": "0.1.1-beta.116+sha512-DwP1CStJmHs5zzr2lH/G3011bhD/rHJ9HPN2xuAS32UfpQ1Hx89YEIKHiAxGhk44qdI3tJU7hZTQhoYMuv1Gqw=="
+      "miaoda-expo-devkit": "0.1.1-beta.119+sha512-f25hk0hBdADXznGOE8+80xtdrb9mNDI5EeffP7d8SlD/q//cqp4IVJ3BVCqYDkNr5pYjEf7gPPgwEpWXTGs3bg=="
     }
-  },
-  "packageManager": "pnpm@10.34.6"
+  }
 }

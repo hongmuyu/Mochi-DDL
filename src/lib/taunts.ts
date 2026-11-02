@@ -75,11 +75,24 @@ export type TauntContext =
   | 'multi' // 多个危险DDL
   | 'normal'; // 普通状态
 
+let lastTaunt = '';
+let lastTauntTime = 0;
+const TAUNT_COOLDOWN_MS = 3000; // 3秒触发冷却，防止连续刷屏
+
 /**
- * 随机获取吐槽文案
+ * 随机获取吐槽文案（带去重与防刷屏冷却）
  */
-function random<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+function randomWithDedupe(arr: string[]): string {
+  const now = Date.now();
+  if (now - lastTauntTime < TAUNT_COOLDOWN_MS && lastTaunt) {
+    return lastTaunt;
+  }
+  const filtered = arr.filter(t => t !== lastTaunt);
+  const candidates = filtered.length > 0 ? filtered : arr;
+  const picked = candidates[Math.floor(Math.random() * candidates.length)];
+  lastTaunt = picked;
+  lastTauntTime = now;
+  return picked;
 }
 
 /**
@@ -87,13 +100,13 @@ function random<T>(arr: T[]): T {
  */
 export function getTaunt(context: TauntContext): string {
   switch (context) {
-    case 'night': return random(NIGHT_TAUNTS);
-    case 'slack': return random(SLACK_TAUNTS);
-    case 'dying': return random(DYING_TAUNTS);
-    case 'critical': return random(CRITICAL_TAUNTS);
-    case 'complete': return random(COMPLETE_TAUNTS);
-    case 'multi': return random(MULTI_DDL_TAUNTS);
-    default: return random(NORMAL_TAUNTS);
+    case 'night': return randomWithDedupe(NIGHT_TAUNTS);
+    case 'slack': return randomWithDedupe(SLACK_TAUNTS);
+    case 'dying': return randomWithDedupe(DYING_TAUNTS);
+    case 'critical': return randomWithDedupe(CRITICAL_TAUNTS);
+    case 'complete': return randomWithDedupe(COMPLETE_TAUNTS);
+    case 'multi': return randomWithDedupe(MULTI_DDL_TAUNTS);
+    default: return randomWithDedupe(NORMAL_TAUNTS);
   }
 }
 

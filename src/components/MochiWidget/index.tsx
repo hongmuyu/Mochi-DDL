@@ -18,7 +18,7 @@
  *    hasRedHotDDL={dangerousTasks.length > 0}
  *    onPress={handleMascotPress} size={120} />
  */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import Animated, {
   cancelAnimation,
@@ -431,12 +431,12 @@ export function useCompletedTodayTrigger(): {
   const [hasCompletedToday, setHasCompletedToday] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const triggerCompleted = () => {
+  const triggerCompleted = useCallback(() => {
     setHasCompletedToday(true);
     if (timerRef.current) clearTimeout(timerRef.current);
     // 8s 后自动切回常态（可重触发）
     timerRef.current = setTimeout(() => setHasCompletedToday(false), 8000);
-  };
+  }, []);
 
   useEffect(() => () => {
     if (timerRef.current) clearTimeout(timerRef.current);

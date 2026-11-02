@@ -142,6 +142,34 @@ export async function scheduleTaskNotifications(task: Task): Promise<{ scheduled
 }
 
 /**
+ * 同一任务同一时刻去重：若自定义提醒与默认提醒落在同一分钟内，自动合并
+ */
+function deduplicateCheckpoints(
+  checkpoints: Array<{ label: string; triggerMs: number; title: string; body: string }>
+): Array<{ label: string; triggerMs: number; title: string; body: string }> {
+  const map = new Map<number, { label: string; triggerMs: number; title: string; body: string }>();
+  for (const cp of checkpoints) {
+    // 粗粒度归一化至分钟级别（防重复触发）
+    const minuteKey = Math.floor(cp.triggerMs / 60000);
+    if (!map.has(minuteKey)) {
+      map.set(minuteKey, cp);
+    }
+  }
+  return Array.from(map.values());
+}
+
+/**
+ * 局部增量同步单个任务通知（任务创建/编辑/延期后调用）
+ */
+export async function syncSingleTaskNotification(task: Task): Promise<void> {
+  if (task.completed || task.status === 'deleted' || new Date(task.deadline).getTime() <= Date.now()) {
+    await cancelTaskNotifications(task.id);
+  } else {
+    await scheduleTaskNotifications(task);
+  }
+}
+
+/**
  * 取消某个任务的所有待推送通知（任务完成/删除/取消时调用）
  */
 export async function cancelTaskNotifications(taskId: string): Promise<void> {
@@ -167,22 +195,43 @@ export async function cancelTaskNotifications(taskId: string): Promise<void> {
 }
 
 /**
- * 批量同步所有任务的通知（启动时/任务变更时调用）
+ * 全量校对并清理孤儿通知（冷启动/备份恢复后调用，数据源来自全量DB无分页限制）
+ */
+export async function reconcileAllNotifications(allActiveTasks?: Task[]): Promise<{ activeCount: number; purgedCount: number }> {
+  try {
+    const { getAllActiveTasksForNotification } = await import('@/db/api');
+    const tasks = allActiveTasks ?? (await getAllActiveTasksForNotification());
+    const validTaskIds = new Set(tasks.map(t => t.id));
+
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+    let purgedCount = 0;
+
+    for (const notif of scheduled) {
+      if (notif.identifier.startsWith('ddl_')) {
+        const parts = notif.identifier.split('_');
+        const taskId = parts[1];
+        if (!validTaskIds.has(taskId)) {
+          await Notifications.cancelScheduledNotificationAsync(notif.identifier).catch(() => undefined);
+          purgedCount++;
+        }
+      }
+    }
+
+    // 为当前活跃任务重新校对注册
+    for (const task of tasks) {
+      await scheduleTaskNotifications(task);
+    }
+
+    return { activeCount: tasks.length, purgedCount };
+  } catch (err) {
+    console.warn('[reconcileAllNotifications] error:', err);
+    return { activeCount: 0, purgedCount: 0 };
+  }
+}
+
+/**
+ * 批量同步所有任务的通知（启动时/任务变更时调用，向后兼容）
  */
 export async function syncAllNotifications(tasks: Task[]): Promise<void> {
-  const permitted = await requestNotificationPermission();
-  if (!permitted) return;
-
-  const activeTasks = tasks.filter(t => !t.completed && new Date(t.deadline).getTime() > Date.now());
-
-  // 完成的任务：取消通知
-  const completedTasks = tasks.filter(t => t.completed);
-  for (const task of completedTasks) {
-    await cancelTaskNotifications(task.id);
-  }
-
-  // 活跃任务：调度/更新通知
-  for (const task of activeTasks) {
-    await scheduleTaskNotifications(task);
-  }
+  await reconcileAllNotifications(tasks);
 }
