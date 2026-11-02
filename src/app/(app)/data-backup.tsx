@@ -149,6 +149,7 @@ export default function DataBackupScreen() {
   const [importMsgOk, setImportMsgOk] = useState(true);
   // §7.4 冲突策略（默认跳过，最安全）
   const [strategy, setStrategy] = useState<ImportConflictStrategy>('skip');
+  const [importMode, setImportMode] = useState<'merge' | 'restore'>('merge');
   const [showConfirm, setShowConfirm] = useState(false);
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [showConflict, setShowConflict] = useState(false);
@@ -239,10 +240,16 @@ export default function DataBackupScreen() {
     setImporting(true);
     setImportMsg('');
     try {
-      const { imported, skipped, truncated } = await importAllData(parsedBackup, strategy);
+      const res = await importAllData(parsedBackup, {
+        mode: importMode,
+        conflictStrategy: strategy,
+      });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      const truncMsg = truncated > 0 ? `，${truncated} 个字段已截断` : '';
-      setImportMsg(`✅ 导入成功！写入 ${imported} 条，跳过 ${skipped} 条${truncMsg}`);
+      const truncMsg = res.truncated > 0 ? `，${res.truncated} 个长文本已截断` : '';
+      const modeLabel = res.mode === 'restore' ? '全量覆盖恢复' : '智能合并导入';
+      setImportMsg(
+        `✅ ${modeLabel}成功！新增任务 ${res.tasksAdded} 条，更新 ${res.tasksUpdated} 条，语录 ${res.quotesImported} 条，成就 ${res.achievementsImported} 项${truncMsg}`
+      );
       setImportMsgOk(true);
       setImportJson('');
       setParsedBackup(null);

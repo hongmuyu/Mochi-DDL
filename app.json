@@ -2,7 +2,7 @@
   "expo": {
     "name": "麻糬のDDL",
     "slug": "ddlife-ddl-simulator",
-    "version": "1.0.86",
+    "version": "1.0.109",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -18,20 +18,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "versionCode": 1,
-      "package": "com.miaoda.appbmlmo7hbv9c1",
-      "permissions": [
-        "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS",
-        "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
-        "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.INTERNET",
-        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
-        "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.READ_MEDIA_AUDIO"
-      ]
+      "package": "com.miaoda.appbmlmo7hbv9c1"
     },
     "web": {
       "bundler": "metro",
@@ -72,15 +59,12 @@
       "expo-image",
       "expo-secure-store"
     ],
+    "router": {
+      "root": "src"
+    },
     "experiments": {
       "typedRoutes": true
     },
-    "scheme": "appbmlmo7hbv9c1",
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "7a24c4e7-90f4-4610-9d59-aaac27006dd8"
-      }
-    }
+    "scheme": "appbmlmo7hbv9c1"
   }
 }

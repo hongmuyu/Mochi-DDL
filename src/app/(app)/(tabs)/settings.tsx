@@ -36,17 +36,27 @@ const C_MINT   = '#2EC4B6';
 const C_TEXT   = '#333333';
 const C_MUTED  = '#888888';
 
-// §8.2 反馈邮件（在 settings 中复用同一函数）
+// §8.2 脱敏反馈邮件与日志向导
 const SUPPORT_EMAIL = 'support@mochiddl.app';
-const PLAY_STORE_ID = 'com.yourcompany.mochiddl';
-const APP_STORE_ID  = 'YOUR_APP_ID';
+const GITHUB_RELEASES_URL = 'https://github.com/miaoda/ddlife-releases/releases';
 
 async function openFeedbackEmail() {
-  const subject = encodeURIComponent('【麻糬のDDL】问题反馈');
-  const body    = encodeURIComponent(`App 版本：v2.7\n系统：${Platform.OS}\n\n问题描述：\n（请在此填写）`);
-  const mailto  = `mailto:${SUPPORT_EMAIL}?subject=${subject}&body=${body}`;
+  const subject = encodeURIComponent('【麻糬のDDL】用户建议与脱敏诊断反馈');
+  const body = encodeURIComponent(
+    `【基础运行环境 (已脱敏)】\n` +
+    `App 版本：2.0.0 (Protocol: 1)\n` +
+    `系统平台：${Platform.OS} (SDK: 55)\n` +
+    `时间戳：${new Date().toISOString()}\n\n` +
+    `【问题现象描述】\n` +
+    `（请详细描述您遇到的问题或改进建议）\n\n` +
+    `【复现步骤】\n` +
+    `1. \n2. \n`
+  );
+  const mailto = `mailto:${SUPPORT_EMAIL}?subject=${subject}&body=${body}`;
   const can = await Linking.canOpenURL(mailto);
-  if (can) await Linking.openURL(mailto);
+  if (can) {
+    await Linking.openURL(mailto);
+  }
 }
 
 // §9.1 主题 Coming Soon 弹窗
@@ -528,7 +538,18 @@ export default function SettingsScreen() {
             }}
           />
 
-          {/* 7. 数据备份 */}
+          {/* 7. 多机安全同步 (V2.0 新增) */}
+          <MenuRow
+            emoji="☁️"
+            label="多机安全同步 (V2.0)"
+            desc="坚果云 WebDAV · 端到端加密 · 离线多端互通"
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              router.push('/(app)/webdav-sync');
+            }}
+          />
+
+          {/* 8. 数据备份 */}
           <MenuRow
             emoji="💾"
             label="数据备份与恢复"
@@ -539,15 +560,37 @@ export default function SettingsScreen() {
             }}
           />
 
-          {/* 8. 关于 */}
+          {/* 9. 关于 */}
           <MenuRow
             emoji="❓"
             label="关于麻糬のDDL"
-            desc="v2.7 · 一个会陪你一起崩溃的DDL模拟器"
-            noBorder
+            desc="v2.0.0 · 一个会陪你一起崩溃的DDL模拟器"
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
               router.push('/(app)/about');
+            }}
+          />
+
+          {/* 10. 问题反馈与脱敏日志 */}
+          <MenuRow
+            emoji="📮"
+            label="意见反馈与脱敏诊断"
+            desc="通过邮件主动发送问题与脱敏环境信息"
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              void openFeedbackEmail();
+            }}
+          />
+
+          {/* 11. 检查更新 */}
+          <MenuRow
+            emoji="🚀"
+            label="版本检查与更新"
+            desc="GitHub Releases 官方稳定版渠道"
+            noBorder
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              void Linking.openURL(GITHUB_RELEASES_URL);
             }}
           />
         </View>

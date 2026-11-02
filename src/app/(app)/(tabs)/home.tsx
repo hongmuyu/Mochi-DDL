@@ -426,15 +426,37 @@ export default function HomeScreen() {
   }, [isStressedUI, stickerEnabled]);
 
   // 吉祥物点击：随机弹出激励语录气泡（从 SQLite 库抽取）
-  const handleMascotPress = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    getOnlyMine().then(onlyMine => getRandomQuote(onlyMine)).then(quote => {
-      setMascotBubble(quote);
-      setShowBubble(true);
-      if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
-      bubbleTimer.current = setTimeout(() => setShowBubble(false), 2000);
-    }).catch(() => {});
-  };
+  const handleMascotPress = useCallback(() => {
+    try {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } catch {}
+
+    const fallbackQuotes = [
+      '再写两行，我就能光明正大地摸鱼了——战术性努力。',
+      '今天只要打开文档，就算我对这个DDL有过诚意。',
+      '先做五分钟，不行就逃——但万一我停不下来呢？',
+      '这个DDL很难，但我的临时抱佛脚技能可是 Lv.99。',
+      "摸鱼够了，现在让'限时版高效的我'上线5分钟。",
+      '管他结果如何，做完就是英雄。',
+      "不需要完美，只需要'算了先交一版'。",
+    ];
+
+    const immediateQuote = fallbackQuotes[Math.floor(Math.random() * fallbackQuotes.length)];
+    setMascotBubble(immediateQuote);
+    setShowBubble(true);
+
+    if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
+    bubbleTimer.current = setTimeout(() => setShowBubble(false), 3000);
+
+    getOnlyMine()
+      .then(onlyMine => getRandomQuote(onlyMine))
+      .then(quote => {
+        if (quote && quote.trim()) {
+          setMascotBubble(quote);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const blinkStyle = useAnimatedStyle(() => ({ opacity: blinkOpacity.value }));
   const sanPulseStyle = useAnimatedStyle(() => ({
@@ -660,10 +682,10 @@ export default function HomeScreen() {
         )}
 
         {/* 吉祥物卡片（§1.1 MochiWidget + §1.5 文字歪斜） */}
-        <Card>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+        <Card style={{ overflow: 'visible', zIndex: 50 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16, position: 'relative' }}>
             {/* MochiWidget：5 状态动画吉祥物 */}
-            <View style={{ alignItems: 'center' }}>
+            <View style={{ alignItems: 'center', position: 'relative', zIndex: 60 }}>
               <MochiWidget
                 hp={spirit.lifePoints}
                 san={spirit.sanityPoints}
@@ -673,36 +695,62 @@ export default function HomeScreen() {
                 onPress={handleMascotPress}
                 size={restMode ? 80 : 100}
               />
-              {/* 气泡对话框 */}
+              {/* 气泡对话框（带倒角小三角形与手账设计风格，点击可立即关闭） */}
               {showBubble && (
-                <View style={{
-                  position: 'absolute',
-                  bottom: 88,
-                  left: -20,
-                  width: 200,
-                  backgroundColor: '#fff',
-                  borderRadius: 14,
-                  borderWidth: 1.5,
-                  borderColor: C_PURPLE,
-                  padding: 8,
-                  zIndex: 10,
-                  boxShadow: [{ offsetX: 0, offsetY: 4, blurRadius: 12, color: 'rgba(108,99,255,0.18)' }],
-                }}>
-                  <Text style={{ color: C_PURPLE, fontSize: 11, lineHeight: 16 }}>"{mascotBubble}"</Text>
+                <Pressable
+                  onPress={() => {
+                    setShowBubble(false);
+                    if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
+                  }}
+                  style={{
+                    position: 'absolute',
+                    bottom: (restMode ? 80 : 100) + 12,
+                    left: -12,
+                    width: 220,
+                    backgroundColor: '#FFFFFF',
+                    borderRadius: 14,
+                    borderWidth: 2,
+                    borderColor: '#2D2A26',
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    zIndex: 999,
+                    boxShadow: [{ offsetX: 2, offsetY: 2, blurRadius: 0, color: '#2D2A26' }],
+                  }}
+                >
+                  <Text style={{ color: '#2D2A26', fontSize: 12, lineHeight: 17, fontWeight: '500' }}>
+                    "{mascotBubble}"
+                  </Text>
+                  <Text style={{ color: '#888', fontSize: 9, marginTop: 4, textAlign: 'right' }}>
+                    点击气泡关闭
+                  </Text>
+                  {/* 实心小三角形倒角 */}
                   <View style={{
                     position: 'absolute',
                     bottom: -8,
-                    left: 28,
+                    left: 45,
+                    width: 0,
+                    height: 0,
+                    borderLeftWidth: 7,
+                    borderRightWidth: 7,
+                    borderTopWidth: 8,
+                    borderLeftColor: 'transparent',
+                    borderRightColor: 'transparent',
+                    borderTopColor: '#2D2A26',
+                  }} />
+                  <View style={{
+                    position: 'absolute',
+                    bottom: -5,
+                    left: 46,
                     width: 0,
                     height: 0,
                     borderLeftWidth: 6,
                     borderRightWidth: 6,
-                    borderTopWidth: 8,
+                    borderTopWidth: 6,
                     borderLeftColor: 'transparent',
                     borderRightColor: 'transparent',
-                    borderTopColor: C_PURPLE,
+                    borderTopColor: '#FFFFFF',
                   }} />
-                </View>
+                </Pressable>
               )}
             </View>
 

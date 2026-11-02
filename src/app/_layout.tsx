@@ -6,6 +6,8 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { PerformanceProvider } from '@/ctx/PerformanceContext';
+import { getDatabaseHealth, getDb } from '@/db/database';
+import { DatabaseRecoveryModal } from '@/components/DatabaseRecoveryModal';
 import "../global.css";
 
 const PRIVACY_KEY = 'ddl_privacy_accepted';
@@ -56,11 +58,17 @@ function PrivacyModal({ onAccept, onViewFull }: { onAccept: () => void; onViewFu
 const RootLayout: React.FC = () => {
   const router = useRouter();
   const [privacyAccepted, setPrivacyAccepted] = useState<boolean | null>(null);
+  const [dbHealth, setDbHealth] = useState(getDatabaseHealth());
 
   useEffect(() => {
     AsyncStorage.getItem(PRIVACY_KEY).then(val => {
       setPrivacyAccepted(val === '1');
     });
+
+    // 检查底层数据库挂载状态
+    getDb()
+      .then(() => setDbHealth(getDatabaseHealth()))
+      .catch(() => setDbHealth(getDatabaseHealth()));
   }, []);
 
   const handleAccept = async () => {
@@ -68,16 +76,20 @@ const RootLayout: React.FC = () => {
     setPrivacyAccepted(true);
   };
 
-  const handleViewFull = async () => {
-    await AsyncStorage.setItem(PRIVACY_KEY, '1');
-    setPrivacyAccepted(true);
-    // 延迟跳转，等 Stack 渲染完成
-    setTimeout(() => router.push('/(app)/privacy-policy'), 100);
+  const handleViewFull = () => {
+    // 仅查看完整政策，绝不自动赋予“已同意”标记
+    router.push('/(app)/privacy-policy');
   };
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <PerformanceProvider>
+        {/* 数据库异常阻断与诊断恢复模态层 */}
+        <DatabaseRecoveryModal
+          health={dbHealth}
+          onRecovered={() => setDbHealth(getDatabaseHealth())}
+          onImportBackup={() => router.push('/(app)/data-backup')}
+        />
         <Stack screenOptions={{ headerShown: false }}>
           <Stack.Screen name="index" />
           <Stack.Screen name="onboarding" />

@@ -9,12 +9,10 @@
       "distribution": "internal"
     },
     "preview": {
-      "developmentClient": false,
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      },
-      "pnpm": "10.34.6"
+      }
     },
     "production": {
       "autoIncrement": true
