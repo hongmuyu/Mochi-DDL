@@ -1,6 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getDb, genId } from '@/db/database';
 import { AppSettings, DailyStats, Priority, Task, TimeRecord, WearState } from '@/types/types';
+import { RestoreManager } from '@/lib/sync/restoreManager';
+import { SyncEngine } from '@/lib/sync/syncEngine';
+import { getAllQuotesForBackup, restoreQuotesFromBackup, Quote } from '@/lib/quotesDb';
+import { DataEventBus } from '@/lib/dataEventBus';
+import { computeNextRepeatDeadline } from '@/lib/repeatRule';
 
 // ==================== 任务相关（SQLite）====================
 
@@ -47,11 +52,150 @@ function rowToTask(row: Record<string, unknown>): Task {
   };
 }
 
+/** 任务分页查询参数 */
+export interface TaskQueryParams {
+  status?: 'active' | 'completed' | 'deleted' | 'all';
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  category?: string;
+  priority?: number;
+  sortBy?: 'deadline' | 'created_at' | 'priority';
+  sortOrder?: 'ASC' | 'DESC';
+}
+
+/** 任务分页返回结果 */
+export interface TaskPageResult {
+  items: Task[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/** 首页独立聚合摘要 */
+export interface HomeTaskSummary {
+  activeCount: number;
+  urgentCount: number;         // 24h 内截止的未完成任务
+  completedTodayCount: number; // 今天完成的任务
+  totalDeletedCount: number;
+  upcomingTasks: Task[];       // 最紧急的 3~5 条任务
+}
+
+/**
+ * 任务多维度条件检索与分页查询（全量在数据库层执行）
+ * 增加稳定二级排序 (id ASC)，彻底杜绝截止时间相同时翻页重复或遗漏
+ */
+export async function getTasksPaged(params: TaskQueryParams = {}): Promise<TaskPageResult> {
+  const db = await getDb();
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.max(1, Math.min(100, params.pageSize ?? 20));
+  const offset = (page - 1) * pageSize;
+
+  const conditions: string[] = [];
+  const args: (string | number)[] = [];
+
+  // 状态筛选
+  if (params.status && params.status !== 'all') {
+    conditions.push('status = ?');
+    args.push(params.status);
+  } else if (!params.status) {
+    conditions.push("status != 'deleted'");
+  }
+
+  // 搜索关键字（标题或备注模糊匹配）
+  if (params.search && params.search.trim()) {
+    conditions.push('(name LIKE ? OR note LIKE ?)');
+    const kw = `%${params.search.trim()}%`;
+    args.push(kw, kw);
+  }
+
+  // 分类筛选
+  if (params.category && params.category !== 'all') {
+    conditions.push('category = ?');
+    args.push(params.category);
+  }
+
+  // 优先级筛选
+  if (typeof params.priority === 'number') {
+    conditions.push('priority = ?');
+    args.push(params.priority);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  // 稳定排序字段与方向映射
+  const sortCol = params.sortBy === 'created_at' ? 'created_at' : params.sortBy === 'priority' ? 'priority' : 'deadline';
+  const sortDir = params.sortOrder === 'DESC' ? 'DESC' : 'ASC';
+
+  // 1. 统计总符合条件的条数
+  const countRow = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(1) as count FROM tasks ${whereClause}`,
+    ...args,
+  );
+  const total = countRow?.count ?? 0;
+  const totalPages = Math.ceil(total / pageSize) || 1;
+
+  // 2. 稳定二级排序分页获取数据
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    `SELECT * FROM tasks ${whereClause} ORDER BY ${sortCol} ${sortDir}, id ASC LIMIT ? OFFSET ?`,
+    ...args,
+    pageSize,
+    offset,
+  );
+
+  return {
+    items: rows.map(rowToTask),
+    total,
+    page,
+    pageSize,
+    totalPages,
+  };
+}
+
+/**
+ * 首页独立聚合摘要查询（脱离任务列表展示条数限制）
+ */
+export async function getHomeSummary(): Promise<HomeTaskSummary> {
+  const db = await getDb();
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const next24hIso = new Date(now.getTime() + 24 * 3600 * 1000).toISOString();
+  const todayPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  const [activeRow, urgentRow, completedTodayRow, deletedRow, upcomingRows] = await Promise.all([
+    db.getFirstAsync<{ count: number }>(`SELECT COUNT(1) as count FROM tasks WHERE status = 'active'`),
+    db.getFirstAsync<{ count: number }>(`SELECT COUNT(1) as count FROM tasks WHERE status = 'active' AND deadline <= ?`, next24hIso),
+    db.getFirstAsync<{ count: number }>(`SELECT COUNT(1) as count FROM tasks WHERE completed = 1 AND completed_at LIKE ?`, `${todayPrefix}%`),
+    db.getFirstAsync<{ count: number }>(`SELECT COUNT(1) as count FROM tasks WHERE status = 'deleted'`),
+    db.getAllAsync<Record<string, unknown>>(`SELECT * FROM tasks WHERE status = 'active' ORDER BY deadline ASC, id ASC LIMIT 5`),
+  ]);
+
+  return {
+    activeCount: activeRow?.count ?? 0,
+    urgentCount: urgentRow?.count ?? 0,
+    completedTodayCount: completedTodayRow?.count ?? 0,
+    totalDeletedCount: deletedRow?.count ?? 0,
+    upcomingTasks: upcomingRows.map(rowToTask),
+  };
+}
+
+/**
+ * 获取全部有效活跃任务（无分页限制，专供后台通知调度与成就计算）
+ */
+export async function getAllActiveTasksForNotification(): Promise<Task[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    `SELECT * FROM tasks WHERE status = 'active' ORDER BY deadline ASC, id ASC`,
+  );
+  return rows.map(rowToTask);
+}
+
 /** 获取所有非已删除任务（按截止时间排序） */
 export async function getAllTasks(): Promise<Task[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Record<string, unknown>>(
-    `SELECT * FROM tasks WHERE status != 'deleted' ORDER BY deadline ASC LIMIT 200`,
+    `SELECT * FROM tasks WHERE status != 'deleted' ORDER BY deadline ASC, id ASC LIMIT 500`,
   );
   return rows.map(rowToTask);
 }
@@ -60,7 +204,7 @@ export async function getAllTasks(): Promise<Task[]> {
 export async function getDeletedTasks(): Promise<Task[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Record<string, unknown>>(
-    `SELECT * FROM tasks WHERE status = 'deleted' ORDER BY deadline DESC LIMIT 100`,
+    `SELECT * FROM tasks WHERE status = 'deleted' ORDER BY deadline DESC, id ASC LIMIT 200`,
   );
   return rows.map(rowToTask);
 }
@@ -80,6 +224,7 @@ export async function createTask(
     repeat_parent_id?: string | null;
   },
 ): Promise<Task> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
   const id = genId();
   const createdAt = new Date().toISOString();
@@ -103,7 +248,8 @@ export async function createTask(
     repeatRule,
     repeatParentId,
   );
-  return {
+
+  const createdTask: Task = {
     id,
     name,
     deadline,
@@ -122,6 +268,17 @@ export async function createTask(
     repeat_rule: repeatRule,
     repeat_parent_id: repeatParentId,
   };
+
+  try {
+    await SyncEngine.getInstance().recordOperation('task', id, 'upsert', createdTask);
+  } catch {
+    // 离线容错
+  }
+
+  // 跨页面广播任务变更
+  DataEventBus.emit('task_changed', { action: 'create', entityId: id });
+
+  return createdTask;
 }
 
 /** 根据 ID 查询单个任务详情 */
@@ -131,102 +288,223 @@ export async function getTaskById(id: string): Promise<Task | null> {
   return row ? rowToTask(row) : null;
 }
 
+export { computeNextRepeatDeadline };
+
 /**
  * 正常完成任务（未过期）——自动推导 completion_type（PRD §4.20）
- * 若任务配置了重复规则（daily/weekly/monthly），自动生成下一周期的新待办任务（PRD §3.3.4）
+ * 若任务配置了重复规则，在同一事务内生成下一周期实例，并保证同一期唯一不重复生成
  */
 export async function completeTask(id: string, deadline: string): Promise<{ task: Task; nextTask?: Task }> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
   const now = Date.now();
   const deadlineTs = new Date(deadline).getTime();
-  // 剩余时间（ms）：正值=未过期，负值=已过期
   const remaining = deadlineTs - now;
   // 压线：未过期且剩余 <= 1h → rush；否则 on_time
   const completionType: Task['completion_type'] = remaining <= 3600_000 ? 'rush' : 'on_time';
-  await db.runAsync(
-    `UPDATE tasks SET completed = 1, completed_at = ?, is_overtime_complete = 0,
-     status = 'completed', completion_type = ? WHERE id = ?`,
-    new Date(now).toISOString(), completionType, id,
-  );
+  const completedAt = new Date(now).toISOString();
 
-  const current = await getTaskById(id);
   let nextTask: Task | undefined;
+  const current = await getTaskById(id);
 
-  // 检查是否配置了重复规则，若是则按周期自动衍生下一次任务
-  if (current && current.repeat_rule && current.repeat_rule !== 'none') {
-    const curDl = new Date(current.deadline);
-    const nextDl = new Date(curDl.getTime());
-    if (current.repeat_rule === 'daily') {
-      nextDl.setDate(nextDl.getDate() + 1);
-    } else if (current.repeat_rule === 'weekly') {
-      nextDl.setDate(nextDl.getDate() + 7);
-    } else if (current.repeat_rule === 'monthly') {
-      nextDl.setMonth(nextDl.getMonth() + 1);
-    }
-
-    // 若有心理提前截止时间，同步位移对应差值
-    let nextCutoff: string | null = null;
-    if (current.cutoff_deadline) {
-      const diff = curDl.getTime() - new Date(current.cutoff_deadline).getTime();
-      nextCutoff = new Date(nextDl.getTime() - diff).toISOString();
-    }
-
-    // 重置子任务完成状态
-    const nextSubtasks = current.subtasks?.map(st => ({
-      ...st,
-      id: genId(),
-      completed: false,
-      completed_at: null,
-    })) ?? null;
-
-    nextTask = await createTask(
-      current.name,
-      nextDl.toISOString(),
-      current.priority,
-      {
-        note: current.note,
-        category: current.category,
-        cutoff_deadline: nextCutoff,
-        reminder_offset: current.reminder_offset,
-        subtasks: nextSubtasks,
-        repeat_rule: current.repeat_rule,
-        repeat_parent_id: current.repeat_parent_id || current.id,
-      },
+  await db.execAsync('BEGIN TRANSACTION');
+  try {
+    await db.runAsync(
+      `UPDATE tasks SET completed = 1, completed_at = ?, is_overtime_complete = 0,
+       status = 'completed', completion_type = ? WHERE id = ?`,
+      completedAt, completionType, id,
     );
+
+    // 检查重复任务派生逻辑
+    if (current && current.repeat_rule && current.repeat_rule !== 'none') {
+      const parentId = current.repeat_parent_id || current.id;
+      // 检查是否已有该系列尚未完成的下一期任务（防重复生成）
+      const existingNext = await db.getFirstAsync<{ id: string }>(
+        `SELECT id FROM tasks WHERE repeat_parent_id = ? AND status = 'active'`,
+        parentId,
+      );
+
+      if (!existingNext) {
+        const nextDeadlineIso = computeNextRepeatDeadline(current.deadline, current.repeat_rule, now);
+
+        let nextCutoff: string | null = null;
+        if (current.cutoff_deadline) {
+          const diff = new Date(current.deadline).getTime() - new Date(current.cutoff_deadline).getTime();
+          nextCutoff = new Date(new Date(nextDeadlineIso).getTime() - diff).toISOString();
+        }
+
+        const nextSubtasks = current.subtasks?.map(st => ({
+          ...st,
+          id: genId(),
+          completed: false,
+          completed_at: null,
+        })) ?? null;
+
+        const nextId = genId();
+        const nextCreatedAt = new Date().toISOString();
+
+        await db.runAsync(
+          `INSERT INTO tasks (id, name, deadline, priority, completed, created_at, is_overtime_complete, status, note, category, cutoff_deadline, reminder_offset, subtasks, repeat_rule, repeat_parent_id)
+           VALUES (?, ?, ?, ?, 0, ?, 0, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+          nextId,
+          current.name,
+          nextDeadlineIso,
+          current.priority,
+          nextCreatedAt,
+          current.note ?? null,
+          current.category ?? null,
+          nextCutoff,
+          current.reminder_offset ?? null,
+          nextSubtasks ? JSON.stringify(nextSubtasks) : null,
+          current.repeat_rule,
+          parentId,
+        );
+
+        nextTask = {
+          id: nextId,
+          name: current.name,
+          deadline: nextDeadlineIso,
+          priority: current.priority,
+          status: 'active',
+          completed: false,
+          completed_at: null,
+          created_at: nextCreatedAt,
+          is_overtime_complete: false,
+          completion_type: null,
+          note: current.note,
+          category: current.category,
+          cutoff_deadline: nextCutoff,
+          reminder_offset: current.reminder_offset,
+          subtasks: nextSubtasks,
+          repeat_rule: current.repeat_rule,
+          repeat_parent_id: parentId,
+        };
+      }
+    }
+
+    await db.execAsync('COMMIT');
+  } catch (e) {
+    await db.execAsync('ROLLBACK');
+    throw e;
   }
 
-  return { task: current ?? (await getTaskById(id))!, nextTask };
+  const updatedTask = (await getTaskById(id))!;
+
+  try {
+    await SyncEngine.getInstance().recordOperation('task', id, 'upsert', updatedTask);
+    if (nextTask) {
+      await SyncEngine.getInstance().recordOperation('task', nextTask.id, 'upsert', nextTask);
+    }
+  } catch {}
+
+  DataEventBus.emit('task_changed', { action: 'complete', entityId: id });
+  return { task: updatedTask, nextTask };
 }
 
-/** 取消完成状态（恢复为未完成任务）并返回恢复后的任务 */
-export async function uncompleteTask(id: string): Promise<Task | null> {
+/**
+ * 撤销任务完成（支持重复任务智能撤回联动，PRD §3.3）
+ * 规则：
+ * - 若派生的下一期任务未被修改且未完成：事务内连同下一期一并撤回/删除；
+ * - 若派生的下一期已被用户编辑或已完成：保留下一期，仅将本期恢复为 active，并给出说明。
+ */
+export async function uncompleteTaskWithRepeatHandling(id: string): Promise<{
+  task: Task;
+  rolledBackNext: boolean;
+  message?: string;
+}> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
-  await db.runAsync(
-    `UPDATE tasks SET completed = 0, completed_at = NULL, is_overtime_complete = 0,
-     status = 'active', completion_type = NULL WHERE id = ?`,
-    id,
-  );
-  return getTaskById(id);
+  const current = await getTaskById(id);
+  if (!current) throw new Error('任务不存在');
+
+  const parentId = current.repeat_parent_id || current.id;
+  let rolledBackNext = false;
+  let message: string | undefined;
+
+  await db.execAsync('BEGIN TRANSACTION');
+  try {
+    // 恢复本任务为进行中
+    await db.runAsync(
+      `UPDATE tasks SET completed = 0, completed_at = NULL, is_overtime_complete = 0,
+       status = 'active', completion_type = NULL WHERE id = ?`,
+      id,
+    );
+
+    // 检查是否有自动派生的下一期
+    if (current.repeat_rule && current.repeat_rule !== 'none') {
+      const nextCandidate = await db.getFirstAsync<Record<string, unknown>>(
+        `SELECT * FROM tasks WHERE repeat_parent_id = ? AND id != ? AND created_at >= ?`,
+        parentId, id, current.completed_at ?? current.created_at,
+      );
+
+      if (nextCandidate) {
+        const next = rowToTask(nextCandidate);
+        // 判断下一期是否已被修改：名称未变、未完成
+        const isUntouched = !next.completed && next.name === current.name;
+        if (isUntouched) {
+          await db.runAsync(`DELETE FROM tasks WHERE id = ?`, next.id);
+          rolledBackNext = true;
+          message = '已撤销完成，并撤回了自动生成的下一期待办';
+        } else {
+          message = '已撤销完成；下一期待办已被编辑或完成，已为您妥善保留';
+        }
+      }
+    }
+
+    await db.execAsync('COMMIT');
+  } catch (e) {
+    await db.execAsync('ROLLBACK');
+    throw e;
+  }
+
+  const updated = (await getTaskById(id))!;
+  DataEventBus.emit('task_changed', { action: 'uncomplete', entityId: id });
+
+  return { task: updated, rolledBackNext, message };
+}
+
+/** 兼容旧接口：取消完成状态 */
+export async function uncompleteTask(id: string): Promise<Task | null> {
+  const { task } = await uncompleteTaskWithRepeatHandling(id);
+  return task;
 }
 
 /** 撤销删除任务（恢复为活动任务或已完成任务）并返回恢复后的任务 */
 export async function restoreTask(id: string): Promise<Task | null> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
   await db.runAsync(
     `UPDATE tasks SET status = CASE WHEN completed = 1 THEN 'completed' ELSE 'active' END WHERE id = ?`,
     id,
   );
-  return getTaskById(id);
+  const updated = await getTaskById(id);
+  if (updated) {
+    try {
+      await SyncEngine.getInstance().recordOperation('task', id, 'upsert', updated);
+    } catch {
+      // 离线容错
+    }
+  }
+  return updated;
 }
 
 /** 超时补完成任务（已过期后点击"补完成"） */
 export async function overtimeCompleteTask(id: string): Promise<void> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
   await db.runAsync(
     `UPDATE tasks SET completed = 1, completed_at = ?, is_overtime_complete = 1,
      status = 'completed', completion_type = 'overtime' WHERE id = ?`,
     new Date().toISOString(), id,
   );
+  const updated = await getTaskById(id);
+  if (updated) {
+    try {
+      await SyncEngine.getInstance().recordOperation('task', id, 'upsert', updated);
+    } catch {
+      // 离线容错
+    }
+  }
 }
 
 /**
@@ -317,6 +595,7 @@ export async function updateTask(
     repeat_parent_id?: string | null;
   },
 ): Promise<Task | null> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
   const sets: string[] = [];
   const vals: (string | number | null)[] = [];
@@ -336,19 +615,40 @@ export async function updateTask(
   if (sets.length === 0) return getTaskById(id);
   vals.push(id);
   await db.runAsync(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`, ...vals);
-  return getTaskById(id);
+
+  const updated = await getTaskById(id);
+  if (updated) {
+    try {
+      await SyncEngine.getInstance().recordOperation('task', id, 'upsert', updated);
+    } catch {
+      // 离线容错
+    }
+  }
+  return updated;
 }
 
 /** 软删除任务（状态标记为 deleted，支持5秒撤销与回收站随时恢复） */
 export async function deleteTask(id: string): Promise<void> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
   await db.runAsync(`UPDATE tasks SET status = 'deleted' WHERE id = ?`, id);
+  try {
+    await SyncEngine.getInstance().recordOperation('task', id, 'delete', { id, status: 'deleted' });
+  } catch {
+    // 离线容错
+  }
 }
 
 /** 彻底永久删除任务（物理删除） */
 export async function permanentlyDeleteTask(id: string): Promise<void> {
+  await RestoreManager.assertWriteAllowed();
   const db = await getDb();
   await db.runAsync(`DELETE FROM tasks WHERE id = ?`, id);
+  try {
+    await SyncEngine.getInstance().recordOperation('task', id, 'delete', { id, permanent: true });
+  } catch {
+    // 离线容错
+  }
 }
 
 /** 清空回收站中所有已删除任务 */
@@ -487,6 +787,124 @@ export async function getRecordByDate(date: string): Promise<TimeRecord | null> 
     `SELECT * FROM time_records WHERE record_date = ?`, date,
   );
   return row ? rowToTimeRecord(row) : null;
+}
+
+/** 统一统计指标聚合结果 */
+export interface UnifiedAggregatedStats {
+  studyMinutes: number;
+  slackMinutes: number;
+  totalCompletedCount: number;
+  completedOnTimeCount: number;
+  completedOvertimeCount: number;
+  /** 按时完成率：0.0~1.0，若分母为0返回 null（前端展示「暂无数据」） */
+  onTimeRate: number | null;
+  /** 逾期未完成任务数（单独展示） */
+  overdueUncompletedCount: number;
+  /** 平均睡眠小时数（排除未录入天数，无录入返回 null） */
+  avgSleepHours: number | null;
+  /** 有效录入睡眠的天数 */
+  recordedSleepDays: number;
+  /** 连续有效专注逻辑天数 */
+  streakDays: number;
+}
+
+/**
+ * 跨区间全量统一统计聚合（全量在 SQL 层面执行，消除 93 天截断限制）
+ */
+export async function getAggregatedStats(
+  startDate: string,
+  endDate: string,
+  cutoffHour = 4,
+): Promise<UnifiedAggregatedStats> {
+  const db = await getDb();
+  const nowIso = new Date().toISOString();
+
+  // 1. 专注、摸鱼与睡眠聚合（排除 sleep_hours=0 或未录入日）
+  const timeRow = await db.getFirstAsync<{
+    totalStudy: number;
+    totalSlack: number;
+    totalSleep: number;
+    sleepDays: number;
+  }>(
+    `SELECT 
+       COALESCE(SUM(study_minutes), 0) as totalStudy,
+       COALESCE(SUM(slack_minutes), 0) as totalSlack,
+       COALESCE(SUM(CASE WHEN sleep_hours > 0 THEN sleep_hours ELSE 0 END), 0) as totalSleep,
+       COALESCE(COUNT(CASE WHEN sleep_hours > 0 THEN 1 END), 0) as sleepDays
+     FROM time_records
+     WHERE record_date >= ? AND record_date <= ?`,
+    startDate, endDate,
+  );
+
+  // 2. 任务完成与按时完成率统计（按时完成含 on_time 与 rush 压线）
+  const taskRow = await db.getFirstAsync<{
+    totalCompleted: number;
+    onTimeCompleted: number;
+    overtimeCompleted: number;
+  }>(
+    `SELECT
+       COALESCE(COUNT(1), 0) as totalCompleted,
+       COALESCE(COUNT(CASE WHEN completion_type IN ('on_time', 'rush') THEN 1 END), 0) as onTimeCompleted,
+       COALESCE(COUNT(CASE WHEN completion_type = 'overtime' THEN 1 END), 0) as overtimeCompleted
+     FROM tasks
+     WHERE completed = 1 
+       AND completed_at >= ? AND completed_at <= ?`,
+    `${startDate}T00:00:00.000Z`,
+    `${endDate}T23:59:59.999Z`,
+  );
+
+  // 3. 逾期未完成任务数（单独展示，不被按时完成率掩盖）
+  const overdueRow = await db.getFirstAsync<{ overdueCount: number }>(
+    `SELECT COALESCE(COUNT(1), 0) as overdueCount FROM tasks WHERE status = 'active' AND deadline < ?`,
+    nowIso,
+  );
+
+  // 4. 连续逻辑专注天数计算（从昨天开始往前回溯连续有专注记录的天数）
+  const todayLogical = dateStringByCutoff(Date.now(), cutoffHour);
+  const [ty, tm, td] = todayLogical.split('-').map(Number);
+  let streakDays = 0;
+  let checkDate = new Date(ty, tm - 1, td, 12, 0, 0);
+
+  // 若今日已有专注记录，计入第 1 天并往前推；若今日尚无，从昨天开始检查
+  const todayRec = await getRecordByDate(todayLogical);
+  if (todayRec && todayRec.study_minutes > 0) {
+    streakDays++;
+    checkDate.setDate(checkDate.getDate() - 1);
+  } else {
+    checkDate.setDate(checkDate.getDate() - 1);
+  }
+
+  for (let i = 0; i < 365; i++) {
+    const dStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
+    const rec = await getRecordByDate(dStr);
+    if (rec && rec.study_minutes > 0) {
+      streakDays++;
+      checkDate.setDate(checkDate.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+
+  const totalComp = taskRow?.totalCompleted ?? 0;
+  const onTimeComp = taskRow?.onTimeCompleted ?? 0;
+  const onTimeRate = totalComp > 0 ? Number((onTimeComp / totalComp).toFixed(3)) : null;
+
+  const sleepDays = timeRow?.sleepDays ?? 0;
+  const totalSleep = timeRow?.totalSleep ?? 0;
+  const avgSleepHours = sleepDays > 0 ? Number((totalSleep / sleepDays).toFixed(1)) : null;
+
+  return {
+    studyMinutes: timeRow?.totalStudy ?? 0,
+    slackMinutes: timeRow?.totalSlack ?? 0,
+    totalCompletedCount: totalComp,
+    completedOnTimeCount: onTimeComp,
+    completedOvertimeCount: taskRow?.overtimeCompleted ?? 0,
+    onTimeRate,
+    overdueUncompletedCount: overdueRow?.overdueCount ?? 0,
+    avgSleepHours,
+    recordedSleepDays: sleepDays,
+    streakDays,
+  };
 }
 
 /** 修正指定时间记录（PRD §3.4.2 专注记录修正） */
@@ -839,28 +1257,35 @@ export async function saveLastSettleDate(date: string): Promise<void> {
 }
 
 /**
- * 生成从 startDate 到 endDate 之间的日期列表（不含两端）
- * 最多返回 30 天
+ * 生成从 lastSettledDate 之后到 yesterdayDate（含）之间的日期列表
+ * 单批最多处理 30 天，避免单次启动耗时过长
  */
-function buildDateRange(startDate: string, endDate: string): string[] {
+function buildSettlementDateRange(lastSettledDate: string, yesterdayDate: string, maxDays = 30): string[] {
+  if (lastSettledDate >= yesterdayDate) return [];
+
   const dates: string[] = [];
-  let cur = new Date(startDate + 'T12:00:00');
-  const end = new Date(endDate + 'T12:00:00');
-  cur.setDate(cur.getDate() + 1); // 不含 start
-  let maxDays = 30;
-  while (cur < end && maxDays-- > 0) {
-    const d = cur;
-    dates.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
-    cur = new Date(cur.getTime() + 86400 * 1000);
+  const [sy, sm, sd] = lastSettledDate.split('-').map(Number);
+  const [ey, em, ed] = yesterdayDate.split('-').map(Number);
+
+  let cur = new Date(sy, sm - 1, sd, 12, 0, 0);
+  const end = new Date(ey, em - 1, ed, 12, 0, 0);
+
+  // 从 lastSettledDate 的后一天开始
+  cur.setDate(cur.getDate() + 1);
+
+  while (cur <= end && dates.length < maxDays) {
+    const y = cur.getFullYear();
+    const m = String(cur.getMonth() + 1).padStart(2, '0');
+    const d = String(cur.getDate()).padStart(2, '0');
+    dates.push(`${y}-${m}-${d}`);
+    cur.setDate(cur.getDate() + 1);
   }
   return dates;
 }
 
 /**
- * 执行跨日惰性结算（PRD 4.22 完整状态机）
- * calcFn: 外部传入当日结算函数（避免循环依赖 state.ts）
- * personalityFn: 可选，生成人格称号（PRD 4.4 完整决策矩阵）
- * 返回是否执行了结算
+ * 执行跨日惰性结算（修正跳日漏算与时区口径缺陷）
+ * 逻辑：只结算已完结的逻辑日（截至昨天）；结算游标保存为实际成功结算的最后一天
  */
 export async function performLazySettlement(
   todayStr: string,
@@ -868,54 +1293,48 @@ export async function performLazySettlement(
   personalityFn?: (input: { hp: number; san: number; karma: number; sleeplessDays: number; slackSecs: number; studySecs: number; redDdlCount: number }) => { title: string; description: string },
 ): Promise<boolean> {
   try {
-    const lastSettle = await loadLastSettleDate();
-    if (lastSettle >= todayStr) return false; // 已是最新
+    const [ty, tm, td] = todayStr.split('-').map(Number);
+    const yesterdayDate = new Date(ty, tm - 1, td - 1, 12, 0, 0);
+    const yesterdayStr = `${yesterdayDate.getFullYear()}-${String(yesterdayDate.getMonth() + 1).padStart(2, '0')}-${String(yesterdayDate.getDate()).padStart(2, '0')}`;
 
+    const lastSettle = await loadLastSettleDate();
+    // 若无历史结算游标，从前天开始，以便昨天的记录能被正常纳入结算
     const fromDate = lastSettle || (() => {
-      // 首次安装：从昨天开始
-      const d = new Date(todayStr + 'T12:00:00');
-      d.setDate(d.getDate() - 1);
+      const d = new Date(ty, tm - 1, td - 2, 12, 0, 0);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     })();
 
-    if (fromDate >= todayStr) {
-      await saveLastSettleDate(todayStr);
-      return false;
-    }
-
-    const datesToSettle = buildDateRange(fromDate, todayStr);
+    // 需结算的日期列表（从 fromDate + 1 到 yesterdayStr，含两端）
+    const datesToSettle = buildSettlementDateRange(fromDate, yesterdayStr, 30);
     if (datesToSettle.length === 0) {
-      await saveLastSettleDate(todayStr);
       return false;
     }
 
     const db = await getDb();
-    // 读取所有相关任务（快照）
     const allTasks = await getAllTasks();
-    // 读取 D-1 的快照作为初始磨损值
     const prevStats = await getDailyStatsByDate(fromDate);
     let rollingWear  = prevStats?.wear  ?? (await loadWearState()).wearValue;
     let rollingKarma = prevStats?.karma ?? 0;
     let sleeplessDays = 0;
+    let lastSettledDone = fromDate;
 
     for (const date of datesToSettle) {
       const record = await getRecordByDate(date);
-      // 统计截至当日的连续熬夜天数（最近 7 天，PRD §4.2.3：sleep_hours < 8 才算熬夜）
+      // 连续熬夜天数判断
       if (record && record.sleep_hours < 8) sleeplessDays = Math.min(sleeplessDays + 1, 7);
       else sleeplessDays = Math.max(0, sleeplessDays - 1);
 
       const { hp, san, newWear, karma } = calcFn(record, allTasks, rollingWear, sleeplessDays);
 
       rollingWear  = newWear;
-      rollingKarma = rollingKarma + karma; // karma 为当日增量
+      rollingKarma = rollingKarma + karma;
 
-      // PRD §4.4：生成每日人格称号（传入精算后数值）
       let personalityTitle: string | null = null;
       let personalityDesc: string | null = null;
       if (personalityFn) {
         const slackSecs  = record ? ((record.manual_slack_minutes  !== null ? record.manual_slack_minutes  : record.timer_slack_minutes)  * 60) : 0;
         const studySecs  = record ? ((record.manual_study_minutes  !== null ? record.manual_study_minutes  : record.timer_study_minutes)  * 60) : 0;
-        const redDdlCount = allTasks.filter(t => !t.completed).length; // 简化：活跃任务数作为代理
+        const redDdlCount = allTasks.filter(t => !t.completed).length;
         const p = personalityFn({ hp, san, karma: rollingKarma, sleeplessDays, slackSecs, studySecs, redDdlCount });
         personalityTitle = p.title;
         personalityDesc  = p.description;
@@ -928,18 +1347,18 @@ export async function performLazySettlement(
         date, hp, san, rollingWear, rollingKarma,
         personalityTitle, personalityDesc, new Date().toISOString(),
       );
+
+      lastSettledDone = date;
     }
 
-    // 更新持久化磨损状态
-    const latest = datesToSettle[datesToSettle.length - 1];
-    const latestStats = await getDailyStatsByDate(latest);
-    if (latestStats) {
-      const wear = await loadWearState();
-      await saveWearState({ ...wear, wearValue: latestStats.wear, lastSettleDate: latest });
-    }
-    await saveLastSettleDate(todayStr);
+    // 更新持久化磨损状态，标记为实际已结算的最新日期
+    const wear = await loadWearState();
+    await saveWearState({ ...wear, wearValue: rollingWear, lastSettleDate: lastSettledDone });
+    await saveLastSettleDate(lastSettledDone);
+
     return true;
-  } catch {
+  } catch (err) {
+    console.warn('[performLazySettlement] failed:', err);
     return false;
   }
 }
@@ -1159,30 +1578,16 @@ import * as SecureStore from 'expo-secure-store';
 import * as Device from 'expo-device';
 
 /** §7.2 当前 Schema 版本 */
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 const SALT_KEY = 'ddl_backup_salt_v1';
 
-/** §7.1 获取（或首次创建）设备级签名盐值 */
-async function getOrCreateSalt(): Promise<string> {
-  try {
-    const existing = await SecureStore.getItemAsync(SALT_KEY);
-    if (existing) return existing;
-    // 首次生成：UUID + 时间戳
-    const newSalt = `${Math.random().toString(36).slice(2)}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await SecureStore.setItemAsync(SALT_KEY, newSalt);
-    return newSalt;
-  } catch {
-    // SecureStore 不可用时降级为固定前缀（仍优于无签名）
-    return 'ddl-fallback-salt-v1';
-  }
-}
-
-/** §7.1 SHA256 签名：SHA256(salt "|" jsonStr) */
-async function computeSignature(jsonStr: string, salt: string): Promise<string> {
+/** 规范化计算跨设备内容校验和（防文件在保存或传输中损坏） */
+async function computeContentChecksum(payload: unknown): Promise<string> {
+  const json = JSON.stringify(payload);
   return Crypto.digestStringAsync(
     Crypto.CryptoDigestAlgorithm.SHA256,
-    `${salt}|${jsonStr}`,
+    json,
     { encoding: Crypto.CryptoEncoding.HEX },
   );
 }
@@ -1197,36 +1602,89 @@ async function getDeviceFingerprint(): Promise<string> {
 }
 
 export interface BackupData {
-  version: number;          // 保留字段（向后兼容旧备份）
-  schema_version: number;   // §7.2 数据库 Schema 版本
-  exportedAt: string;       // ISO 字符串
-  device_fingerprint: string; // §7.1 脱敏设备指纹（换机检测）
-  signature: string;        // §7.1 SHA256 签名
+  version: number;            // 保留字段（向后兼容旧备份）
+  schema_version: number;     // §7.2 数据库 Schema 版本
+  exportedAt: string;         // ISO 字符串
+  device_fingerprint?: string; // 脱敏设备指纹
+  content_checksum?: string;  // 跨设备可靠内容校验和（SHA256）
+  signature?: string;          // 旧版设备签名（保留向前兼容）
   tables: {
     tasks: Record<string, unknown>[];
     time_records: Record<string, unknown>[];
     timer_sessions: Record<string, unknown>[];
-    custom_quotes: Record<string, unknown>[];
-    achievements_state: Record<string, unknown>[];
+    daily_aggregates?: Record<string, unknown>[];
+    card_favorites?: Record<string, unknown>[];
+    quotes?: Record<string, unknown>[];          // 真实来自 quotes.db
+    custom_quotes?: Record<string, unknown>[];   // 兼容旧备份
+    achievements_state?: Record<string, unknown>[]; // 兼容旧备份
   };
   asyncStorage: {
     wear: string | null;
     settings: string | null;
     penalties: string | null;
+    achievements?: string | null;          // 真实来自 ddlife_achievements_v1
+    day_cutoff_hour?: string | null;       // 真实日切点
+    sticker_anim_disabled?: string | null; // 动画偏好
+    quotes_only_mine?: string | null;      // 语录偏好
   };
-  /** 兼容旧版 checksum 字段（不校验，仅忽略） */
-  checksum?: number;
+  checksum?: number; // 兼容旧版
 }
+
+// ── 导入摘要结构 ────────────────────────────────────────────────
+export interface ImportSummary {
+  mode: 'restore' | 'merge';
+  imported: number;
+  skipped: number;
+  truncated: number;
+  tasksAdded: number;
+  tasksUpdated: number;
+  tasksSkipped: number;
+  quotesImported: number;
+  achievementsImported: number;
+}
+
+// ── SQL 白名单与表字段防护（防止未知字段和SQL注入）─────────────
+const ALLOWED_TABLES: Record<string, Set<string>> = {
+  tasks: new Set([
+    'id', 'name', 'deadline', 'priority', 'completed', 'completed_at',
+    'created_at', 'is_overtime_complete', 'status', 'completion_type',
+    'note', 'category', 'cutoff_deadline', 'reminder_offset', 'subtasks',
+    'repeat_rule', 'repeat_parent_id',
+  ]),
+  time_records: new Set([
+    'id', 'record_date', 'study_minutes', 'slack_minutes', 'sleep_hours',
+    'late_hours', 'timer_study_minutes', 'timer_slack_minutes',
+    'manual_study_minutes', 'manual_slack_minutes', 'is_manual_override',
+    'created_at',
+  ]),
+  timer_sessions: new Set([
+    'id', 'session_type', 'start_timestamp', 'end_timestamp',
+    'duration_seconds', 'is_valid', 'assigned_date',
+    'split_from_session_id', 'settled_date',
+  ]),
+  daily_aggregates: new Set([
+    'date', 'total_study_seconds', 'total_slack_seconds', 'total_sleep_hours',
+    'final_hp', 'final_san', 'final_karma', 'wear_snapshot', 'karma_snapshot',
+    'sleep_debt', 'streak_sleepless_days', 'red_ddl_count', 'completed_on_time',
+    'completed_rush', 'completed_overtime', 'slack_over_8h_flag',
+    'study_over_4h_flag', 'personality_title', 'personality_desc',
+    'unfinished_task_weighted_sum',
+  ]),
+  card_favorites: new Set(['date', 'favorited_at', 'note']),
+};
 
 // ── §7.2 Migration 链 ─────────────────────────────────────────
 const MIGRATIONS: Record<number, (data: BackupData['tables']) => BackupData['tables']> = {
-  // v1 → v2：确保 timer_sessions 表存在
   1: (d) => ({ ...d, timer_sessions: d.timer_sessions ?? [] }),
-  // v2 → v3：确保 custom_quotes / achievements_state 存在
   2: (d) => ({
     ...d,
-    custom_quotes: d.custom_quotes ?? [],
-    achievements_state: d.achievements_state ?? [],
+    quotes: d.quotes ?? d.custom_quotes ?? [],
+  }),
+  3: (d) => ({
+    ...d,
+    quotes: d.quotes ?? d.custom_quotes ?? [],
+    daily_aggregates: d.daily_aggregates ?? [],
+    card_favorites: d.card_favorites ?? [],
   }),
 };
 
@@ -1244,7 +1702,7 @@ function migrateData(
 
 // ── §7.3 字段截断 ─────────────────────────────────────────────
 const FIELD_LIMITS: Record<string, number> = {
-  name: 200, title: 200, note: 1000, category: 50, text: 50, personality_title: 50,
+  name: 200, title: 200, note: 1000, category: 50, text: 100, personality_title: 50,
   personality_desc: 200, assigned_date: 10,
 };
 const GLOBAL_LIMIT = 10 * 1024; // 10KB
@@ -1272,7 +1730,7 @@ function sanitizeRow(row: Record<string, unknown>): { row: Record<string, unknow
 
 function sanitizeTables(tables: BackupData['tables']): { tables: BackupData['tables']; totalTruncated: number } {
   let totalTruncated = 0;
-  const sanitize = (rows: Record<string, unknown>[]) => rows.map(r => {
+  const sanitize = (rows?: Record<string, unknown>[]) => (rows ?? []).map(r => {
     const { row, truncated } = sanitizeRow(r);
     totalTruncated += truncated;
     return row;
@@ -1282,8 +1740,9 @@ function sanitizeTables(tables: BackupData['tables']): { tables: BackupData['tab
       tasks: sanitize(tables.tasks),
       time_records: sanitize(tables.time_records),
       timer_sessions: sanitize(tables.timer_sessions),
-      custom_quotes: sanitize(tables.custom_quotes),
-      achievements_state: sanitize(tables.achievements_state),
+      daily_aggregates: sanitize(tables.daily_aggregates),
+      card_favorites: sanitize(tables.card_favorites),
+      quotes: sanitize(tables.quotes ?? tables.custom_quotes),
     },
     totalTruncated,
   };
@@ -1304,41 +1763,63 @@ export async function scanTitleConflicts(backup: BackupData): Promise<string[]> 
   return backupNames.filter(t => existingNames.has(t));
 }
 
-/** §7.1 导出全量数据，包含 SHA256 签名 */
+/** §7.1 真实全量数据导出（完整覆盖主DB各表、quotes.db语录以及AsyncStorage成就与配置） */
 export async function exportAllData(): Promise<string> {
   const db = await getDb();
-  const [tasks, timeRecords, timerSessions, customQuotes, achState] = await Promise.all([
+  const [tasks, timeRecords, timerSessions, dailyAggs, cardFavs, quotes] = await Promise.all([
     db.getAllAsync<Record<string, unknown>>('SELECT * FROM tasks'),
     db.getAllAsync<Record<string, unknown>>('SELECT * FROM time_records'),
     db.getAllAsync<Record<string, unknown>>('SELECT * FROM timer_sessions'),
-    db.getAllAsync<Record<string, unknown>>('SELECT * FROM custom_quotes').catch(() => []),
-    db.getAllAsync<Record<string, unknown>>('SELECT * FROM achievements_state').catch(() => []),
+    db.getAllAsync<Record<string, unknown>>('SELECT * FROM daily_aggregates').catch(() => []),
+    db.getAllAsync<Record<string, unknown>>('SELECT * FROM card_favorites').catch(() => []),
+    getAllQuotesForBackup().catch(() => []),
   ]);
 
-  const [wear, settings, penalties, salt, fingerprint] = await Promise.all([
+  const [wear, settings, penalties, achievements, cutoffHour, animDisabled, quotesOnlyMine, fingerprint] = await Promise.all([
     AsyncStorage.getItem('ddlife_wear_state_v1'),
     AsyncStorage.getItem('ddlife_settings'),
     AsyncStorage.getItem('ddlife_penalty_adjustments'),
-    getOrCreateSalt(),
+    AsyncStorage.getItem('ddlife_achievements_v1'),
+    AsyncStorage.getItem('day_cutoff_hour'),
+    AsyncStorage.getItem('sticker_anim_disabled'),
+    AsyncStorage.getItem('ddlife_quotes_only_mine'),
     getDeviceFingerprint(),
   ]);
 
-  const payload: Omit<BackupData, 'signature'> = {
-    version: 2,
+  const payload: Omit<BackupData, 'signature' | 'content_checksum'> = {
+    version: 3,
     schema_version: CURRENT_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     device_fingerprint: fingerprint,
-    tables: { tasks, time_records: timeRecords, timer_sessions: timerSessions, custom_quotes: customQuotes, achievements_state: achState },
-    asyncStorage: { wear, settings, penalties },
+    tables: {
+      tasks,
+      time_records: timeRecords,
+      timer_sessions: timerSessions,
+      daily_aggregates: dailyAggs,
+      card_favorites: cardFavs,
+      quotes: quotes as unknown as Record<string, unknown>[],
+      custom_quotes: quotes as unknown as Record<string, unknown>[], // 兼容旧版解析
+    },
+    asyncStorage: {
+      wear,
+      settings,
+      penalties,
+      achievements,
+      day_cutoff_hour: cutoffHour,
+      sticker_anim_disabled: animDisabled,
+      quotes_only_mine: quotesOnlyMine,
+    },
   };
 
-  const jsonForSig = JSON.stringify(payload);
-  const signature = await computeSignature(jsonForSig, salt);
-  const backup: BackupData = { ...payload, signature };
+  const checksum = await computeContentChecksum(payload);
+  const backup: BackupData = {
+    ...payload,
+    content_checksum: checksum,
+  };
   return JSON.stringify(backup, null, 2);
 }
 
-/** §7.1/§7.2 验证备份 JSON 签名 + Schema 版本，返回解析后的 BackupData 或抛出错误 */
+/** §7.1/§7.2 验证备份 JSON 内容校验和 + Schema 版本，返回解析后的 BackupData 或抛出错误 */
 export async function parseAndVerifyBackup(jsonStr: string): Promise<BackupData> {
   let data: BackupData;
   try {
@@ -1347,7 +1828,7 @@ export async function parseAndVerifyBackup(jsonStr: string): Promise<BackupData>
     throw new Error('JSON 格式错误，无法解析备份文件');
   }
   if (!data.exportedAt || !data.tables) {
-    throw new Error('备份文件格式不正确，缺少必要字段');
+    throw new Error('备份文件格式不正确，缺少必要数据表');
   }
 
   // §7.2 Schema 版本校验
@@ -1356,116 +1837,161 @@ export async function parseAndVerifyBackup(jsonStr: string): Promise<BackupData>
     throw new Error(`备份版本过新（v${backupSchema}），请升级 App 后重试`);
   }
 
-  // §7.1 签名校验（旧版 checksum 备份跳过签名校验）
-  if (data.signature) {
-    const currentFingerprint = await getDeviceFingerprint();
-    const isSameDevice = data.device_fingerprint === currentFingerprint;
-    if (isSameDevice) {
-      // 同设备：严格签名校验
-      const salt = await getOrCreateSalt();
-      const { signature, ...rest } = data;
-      const expected = await computeSignature(JSON.stringify(rest), salt);
-      if (signature !== expected) {
-        throw new Error('备份文件可能已被篡改或损坏，麻糬不敢导入哦~ 🍡');
-      }
+  // 跨设备内容校验和校验（若存在 content_checksum）
+  if (data.content_checksum) {
+    const { content_checksum, signature, ...rest } = data;
+    const computed = await computeContentChecksum(rest);
+    if (computed !== content_checksum) {
+      throw new Error('备份文件内容校验和不匹配，文件可能在传输中损坏，已终止导入 🛡️');
     }
-    // 换机：跳过签名，仅做格式校验（salt 不同，无法验证）
   }
 
   return data;
 }
 
 /**
- * §7.4 将备份数据导入数据库
- * strategy:
- *   'overwrite' — 同名任务用备份版本替换（按 title 匹配）
- *   'skip'      — 跳过同名任务，保留现有
- *   'rename'    — 同名任务加日期后缀后导入
+ * §7.4 全量数据恢复或智能合并导入
+ * @param backup 解析后的备份数据
+ * @param options mode: 'restore'（完整覆盖还原）| 'merge'（基于ID智能合并）
  */
 export async function importAllData(
   backup: BackupData,
-  strategy: ImportConflictStrategy = 'overwrite',
-): Promise<{ imported: number; skipped: number; truncated: number }> {
+  options?: {
+    mode?: 'restore' | 'merge';
+    conflictStrategy?: ImportConflictStrategy;
+  } | ImportConflictStrategy,
+): Promise<ImportSummary> {
+  const mode: 'restore' | 'merge' = (typeof options === 'object' && options?.mode) ? options.mode : 'merge';
+  const strategy: ImportConflictStrategy = (typeof options === 'string')
+    ? options
+    : (options?.conflictStrategy ?? 'overwrite');
+
   const db = await getDb();
   let imported = 0;
   let skipped = 0;
+  let tasksAdded = 0;
+  let tasksUpdated = 0;
+  let tasksSkipped = 0;
 
-  // §7.2 Migration
+  // Migration 链
   const backupSchema = backup.schema_version ?? backup.version ?? 1;
   const migratedTables = migrateData(backup.tables, backupSchema, CURRENT_SCHEMA_VERSION);
 
-  // §7.3 字段截断
+  // 字段截断与合法化
   const { tables, totalTruncated } = sanitizeTables(migratedTables);
 
-  // §7.4 同名任务集合（name → existing row）
+  // 现有任务映射
   const existingTasks = await db.getAllAsync<{ id: string; name: string }>(
     'SELECT id, name FROM tasks',
   );
+  const existingById = new Set(existingTasks.map(t => t.id));
   const existingByName = new Map(existingTasks.map(t => [t.name, t.id]));
 
   const suffix = `_备份_${backup.exportedAt.slice(0, 10).replace(/-/g, '')}`;
 
-  /** 通用 upsert */
-  async function upsertRows(table: string, rows: Record<string, unknown>[]) {
-    for (const row of rows) {
-      try {
-        const cols = Object.keys(row);
-        if (cols.length === 0) continue;
-        const placeholders = cols.map(() => '?').join(', ');
-        const updates = cols.map(c => `${c} = excluded.${c}`).join(', ');
-        const values = cols.map(c => row[c]) as import('expo-sqlite').SQLiteBindValue[];
-        await db.runAsync(
-          `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})
-           ON CONFLICT(id) DO UPDATE SET ${updates}`,
-          values,
-        );
-        imported++;
-      } catch { skipped++; }
+  /** 白名单安全入库辅助函数 */
+  async function insertWhitelistedRow(table: string, row: Record<string, unknown>, onConflictDoUpdate = true) {
+    const allowed = ALLOWED_TABLES[table];
+    if (!allowed) return false;
+
+    const validEntries = Object.entries(row).filter(([k, v]) => allowed.has(k) && v !== undefined);
+    if (validEntries.length === 0) return false;
+
+    const cols = validEntries.map(([k]) => k);
+    const placeholders = cols.map(() => '?').join(', ');
+    const values = validEntries.map(([, v]) => v) as import('expo-sqlite').SQLiteBindValue[];
+
+    let sql = `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`;
+    if (onConflictDoUpdate) {
+      const updates = cols.filter(c => c !== 'id' && c !== 'date' && c !== 'record_date').map(c => `${c} = excluded.${c}`).join(', ');
+      if (updates) {
+        sql += ` ON CONFLICT DO UPDATE SET ${updates}`;
+      } else {
+        sql += ` ON CONFLICT DO NOTHING`;
+      }
+    } else {
+      sql += ` ON CONFLICT DO NOTHING`;
     }
+
+    await db.runAsync(sql, values);
+    return true;
   }
 
-  // §7.4 按策略处理 tasks（SQLite 事务包裹保证原子性）
+  // 开启事务执行全量覆盖或智能合并
   await db.execAsync('BEGIN TRANSACTION');
   try {
+    if (mode === 'restore') {
+      // 完整覆盖模式：清空现有主要表
+      await db.execAsync(`
+        DELETE FROM tasks;
+        DELETE FROM time_records;
+        DELETE FROM timer_sessions;
+        DELETE FROM daily_aggregates;
+        DELETE FROM card_favorites;
+      `);
+    }
+
+    // 1. tasks 处理
     for (const rawRow of tables.tasks) {
       const row = { ...rawRow };
       const taskName = (row.name ?? row.title ?? '未命名任务') as string;
       row.name = taskName;
       delete row.title;
-      const conflictId = existingByName.get(taskName);
 
-      if (conflictId) {
-        if (strategy === 'skip') {
-          skipped++;
-          continue;
-        } else if (strategy === 'overwrite') {
-          // 保留现有 id，更新其他字段
-          row.id = conflictId;
-        } else if (strategy === 'rename') {
-          const maxBase = 200 - suffix.length;
-          row.name = (taskName.length > maxBase ? taskName.slice(0, maxBase) + '…' : taskName) + suffix;
-          // 新 id，避免与任何行冲突
-          row.id = `${String(row.id ?? '')}_ren_${Date.now()}`;
+      const hasSameId = existingById.has(String(row.id));
+      const conflictNameId = existingByName.get(taskName);
+
+      if (mode === 'merge') {
+        if (hasSameId) {
+          // ID 已存在，更新该任务
+          tasksUpdated++;
+        } else if (conflictNameId) {
+          // 同名但 ID 不同冲突
+          if (strategy === 'skip') {
+            tasksSkipped++;
+            skipped++;
+            continue;
+          } else if (strategy === 'overwrite') {
+            row.id = conflictNameId;
+            tasksUpdated++;
+          } else if (strategy === 'rename') {
+            const maxBase = 200 - suffix.length;
+            row.name = (taskName.length > maxBase ? taskName.slice(0, maxBase) + '…' : taskName) + suffix;
+            row.id = `${String(row.id ?? '')}_ren_${Date.now()}`;
+            tasksAdded++;
+          }
+        } else {
+          tasksAdded++;
         }
+      } else {
+        tasksAdded++;
       }
 
-      try {
-        const cols = Object.keys(row);
-        const ph = cols.map(() => '?').join(', ');
-        const vals = cols.map(c => row[c]) as import('expo-sqlite').SQLiteBindValue[];
-        await db.runAsync(
-          `INSERT INTO tasks (${cols.join(', ')}) VALUES (${ph})
-           ON CONFLICT(id) DO UPDATE SET ${cols.filter(c => c !== 'id').map(c => `${c} = excluded.${c}`).join(', ')}`,
-          vals,
-        );
-        imported++;
-      } catch { skipped++; }
+      const ok = await insertWhitelistedRow('tasks', row, true);
+      if (ok) imported++; else skipped++;
     }
 
-    await upsertRows('time_records', tables.time_records);
-    await upsertRows('timer_sessions', tables.timer_sessions);
-    await upsertRows('custom_quotes', tables.custom_quotes);
-    await upsertRows('achievements_state', tables.achievements_state);
+    // 2. time_records / timer_sessions / daily_aggregates / card_favorites
+    for (const r of tables.time_records) {
+      const ok = await insertWhitelistedRow('time_records', r, true);
+      if (ok) imported++; else skipped++;
+    }
+    for (const r of tables.timer_sessions) {
+      const ok = await insertWhitelistedRow('timer_sessions', r, mode === 'restore');
+      if (ok) imported++; else skipped++;
+    }
+    if (tables.daily_aggregates) {
+      for (const r of tables.daily_aggregates) {
+        const ok = await insertWhitelistedRow('daily_aggregates', r, true);
+        if (ok) imported++; else skipped++;
+      }
+    }
+    if (tables.card_favorites) {
+      for (const r of tables.card_favorites) {
+        const ok = await insertWhitelistedRow('card_favorites', r, true);
+        if (ok) imported++; else skipped++;
+      }
+    }
 
     await db.execAsync('COMMIT');
   } catch (e) {
@@ -1473,13 +1999,53 @@ export async function importAllData(
     throw e;
   }
 
-  // 恢复 AsyncStorage
-  const { wear, settings, penalties } = backup.asyncStorage;
+  // 3. 恢复语录到 quotes.db
+  let quotesCount = 0;
+  const rawQuotes = (tables.quotes ?? tables.custom_quotes) as unknown as Quote[];
+  if (Array.isArray(rawQuotes) && rawQuotes.length > 0) {
+    const qRes = await restoreQuotesFromBackup(rawQuotes, mode);
+    quotesCount = qRes.added + qRes.updated;
+  }
+
+  // 4. 恢复 AsyncStorage
+  let achievementsCount = 0;
+  const { wear, settings, penalties, achievements, day_cutoff_hour, sticker_anim_disabled, quotes_only_mine } = backup.asyncStorage;
   if (wear)      await AsyncStorage.setItem('ddlife_wear_state_v1', wear);
   if (settings)  await AsyncStorage.setItem('ddlife_settings', settings);
   if (penalties) await AsyncStorage.setItem('ddlife_penalty_adjustments', penalties);
+  if (day_cutoff_hour)       await AsyncStorage.setItem('day_cutoff_hour', day_cutoff_hour);
+  if (sticker_anim_disabled) await AsyncStorage.setItem('sticker_anim_disabled', sticker_anim_disabled);
+  if (quotes_only_mine)      await AsyncStorage.setItem('ddlife_quotes_only_mine', quotes_only_mine);
 
-  return { imported, skipped, truncated: totalTruncated };
+  if (achievements) {
+    try {
+      const parsed = JSON.parse(achievements);
+      if (typeof parsed === 'object' && parsed !== null) {
+        if (mode === 'restore') {
+          await AsyncStorage.setItem('ddlife_achievements_v1', achievements);
+        } else {
+          // 合并已有成就与备份成就
+          const existingRaw = await AsyncStorage.getItem('ddlife_achievements_v1');
+          const existing = existingRaw ? JSON.parse(existingRaw) : {};
+          const merged = { ...existing, ...parsed };
+          await AsyncStorage.setItem('ddlife_achievements_v1', JSON.stringify(merged));
+        }
+        achievementsCount = Object.keys(parsed).length;
+      }
+    } catch {}
+  }
+
+  return {
+    mode,
+    imported,
+    skipped,
+    truncated: totalTruncated,
+    tasksAdded,
+    tasksUpdated,
+    tasksSkipped,
+    quotesImported: quotesCount,
+    achievementsImported: achievementsCount,
+  };
 }
 
 /**

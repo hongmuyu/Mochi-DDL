@@ -311,3 +311,65 @@ export async function getOnlyMine(): Promise<boolean> {
 export async function setOnlyMine(v: boolean): Promise<void> {
   await AsyncStorage.setItem(ONLY_MINE_KEY, v ? '1' : '0');
 }
+
+/** 供全量备份提取所有用户自定义与季节限定语录 */
+export async function getAllQuotesForBackup(): Promise<Quote[]> {
+  const all = await getAllQuotes();
+  // 内置语录各端自带，备份重点保存自定义及季节语录；若全部保存亦可无损还原
+  return all.filter(q => !q.is_builtin);
+}
+
+/** 供全量备份导入与恢复语录数据 */
+export async function restoreQuotesFromBackup(
+  quotes: Quote[],
+  mode: 'restore' | 'merge' = 'merge',
+): Promise<{ added: number; updated: number; skipped: number }> {
+  const db = await getQuotesDb();
+  if (!db) return { added: 0, updated: 0, skipped: quotes.length };
+
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  if (mode === 'restore') {
+    // 完整恢复：清除原有的非内置语录
+    await db.runAsync('DELETE FROM quotes WHERE is_builtin = 0;');
+  }
+
+  for (const q of quotes) {
+    if (!q || !q.text || typeof q.text !== 'string') {
+      skipped++;
+      continue;
+    }
+    const text = q.text.trim();
+    if (!text) {
+      skipped++;
+      continue;
+    }
+
+    const existing = await db.getFirstAsync<{ id: number }>(
+      'SELECT id FROM quotes WHERE text = ?;', [text],
+    );
+
+    if (existing) {
+      if (mode === 'restore' || mode === 'merge') {
+        // 更新激活与季节属性
+        await db.runAsync(
+          'UPDATE quotes SET is_active = ?, season_tag = ?, valid_from = ?, valid_until = ?, is_seasonal = ? WHERE id = ?;',
+          [q.is_active ? 1 : 0, q.season_tag ?? null, q.valid_from ?? null, q.valid_until ?? null, q.is_seasonal ? 1 : 0, existing.id],
+        );
+        updated++;
+      } else {
+        skipped++;
+      }
+    } else {
+      await db.runAsync(
+        'INSERT INTO quotes (text, is_active, is_builtin, season_tag, valid_from, valid_until, is_seasonal) VALUES (?, ?, 0, ?, ?, ?, ?);',
+        [text, q.is_active ? 1 : 0, q.season_tag ?? null, q.valid_from ?? null, q.valid_until ?? null, q.is_seasonal ? 1 : 0],
+      );
+      added++;
+    }
+  }
+
+  return { added, updated, skipped };
+}

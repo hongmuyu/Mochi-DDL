@@ -4,7 +4,7 @@
  * 本周/本月：分组条形图（横向滚动）
  * 累计统计 + 每日明细（含修改窗口期） + 幽默彩蛋
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -34,20 +34,40 @@ const C_RED    = '#FF003C';
 const COLORS = { study: C_MINT, slack: C_PINK, sleep: C_PURPLE };
 
 type RangeKey = 'today' | 'week' | 'month';
-const RANGE_LABELS: Record<RangeKey, string> = { today: '今日', week: '本周', month: '本月' };
+const RANGE_LABELS: Record<RangeKey, string> = { today: '日报', week: '本周', month: '本月' };
 
 // ── 工具 ──────────────────────────────────────────────────
-function toDateStr(d: Date): string { return d.toISOString().split('T')[0]; }
+function toLocalDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function addDays(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + days);
+  return toLocalDateStr(date);
+}
+
+function formatFullDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const w = weekdays[date.getDay()];
+  return `${y}年${m}月${d}日 ${w}`;
+}
 
 function getRangeStartEnd(key: RangeKey): { start: string; end: string } {
   const now = new Date();
-  const end = toDateStr(now);
+  const end = toLocalDateStr(now);
   if (key === 'today') return { start: end, end };
   if (key === 'week') {
     const d = new Date(now);
     const day = d.getDay() === 0 ? 6 : d.getDay() - 1;
     d.setDate(d.getDate() - day);
-    return { start: toDateStr(d), end };
+    return { start: toLocalDateStr(d), end };
   }
   // month
   const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
@@ -60,8 +80,8 @@ function fmtH(min: number): string {
 }
 
 function fmtDate(s: string): string {
-  const d = new Date(s + 'T00:00:00');
-  return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}`;
+  const [y, m, d] = s.split('-').map(Number);
+  return `${m}-${String(d).padStart(2, '0')}`;
 }
 
 // ── SVG饼图 ────────────────────────────────────────────────
@@ -154,7 +174,7 @@ function GroupedBarChart({ records }: { records: TimeRecord[] }) {
         const studyH = r.study_minutes / 60;
         const slackH = r.slack_minutes / 60;
         const sleepH = r.sleep_hours ?? 0;
-        const isToday = r.record_date === toDateStr(new Date());
+        const isToday = r.record_date === toLocalDateStr(new Date());
         return (
           <View key={r.record_date} style={{ width: GROUP_W, alignItems: 'center' }}>
             <View style={{ flexDirection: 'row', alignItems: 'flex-end', height: BAR_H, gap: 3 }}>
@@ -215,6 +235,134 @@ function getEditWindow(recordDate: string): { window: EditWindow; daysAgo: numbe
 function todayStr(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// ── 历史归档日期选择器弹窗 ─────────────────────────────────
+function DatePickerModal({
+  visible,
+  currentDate,
+  availableDates,
+  onClose,
+  onSelectDate,
+}: {
+  visible: boolean;
+  currentDate: string;
+  availableDates: string[];
+  onClose: () => void;
+  onSelectDate: (date: string) => void;
+}) {
+  if (!visible) return null;
+  const today = toLocalDateStr(new Date());
+
+  // 过去30天日期
+  const past30Days: string[] = [];
+  for (let i = 0; i < 30; i++) {
+    past30Days.push(addDays(today, -i));
+  }
+
+  const recordDateSet = new Set(availableDates);
+
+  return (
+    <View style={{
+      position: 'absolute', inset: 0,
+      backgroundColor: 'rgba(0,0,0,0.45)',
+      alignItems: 'center', justifyContent: 'center',
+      zIndex: 110,
+    }}>
+      <View style={{
+        backgroundColor: '#FFFDF2', borderRadius: 24, padding: 20,
+        width: '90%', maxHeight: '75%',
+        borderWidth: 2, borderColor: '#2D2A26',
+        boxShadow: [{ offsetX: 3, offsetY: 3, blurRadius: 0, color: '#2D2A26' }],
+      }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <View>
+            <Text style={{ color: C_PURPLE, fontSize: 16, fontWeight: 'bold' }}>
+              📅 历史日报归档翻阅
+            </Text>
+            <Text style={{ color: C_MUTED, fontSize: 11, marginTop: 2 }}>
+              选择过去30天内任意日期快速查阅
+            </Text>
+          </View>
+          <Pressable
+            onPress={onClose}
+            style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: '#EFECE6', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <Text style={{ color: '#666', fontSize: 14, fontWeight: 'bold' }}>✕</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView showsVerticalScrollIndicator={false} style={{ marginVertical: 6 }}>
+          <View style={{ gap: 6 }}>
+            {past30Days.map(d => {
+              const isSelected = d === currentDate;
+              const isToday = d === today;
+              const hasRec = recordDateSet.has(d);
+              return (
+                <Pressable
+                  key={d}
+                  onPress={() => onSelectDate(d)}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    paddingVertical: 10,
+                    paddingHorizontal: 12,
+                    borderRadius: 12,
+                    borderWidth: 1.5,
+                    borderColor: isSelected ? C_PURPLE : isToday ? C_PINK : '#E8E5DD',
+                    backgroundColor: isSelected ? `${C_PURPLE}15` : isToday ? '#FFF5F7' : '#FFFFFF',
+                  }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={{
+                      fontSize: 13,
+                      fontWeight: isSelected || isToday ? '700' : '500',
+                      color: isSelected ? C_PURPLE : C_TEXT,
+                    }}>
+                      {formatFullDate(d)}
+                    </Text>
+                    {isToday && (
+                      <View style={{ backgroundColor: C_PINK, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1.5 }}>
+                        <Text style={{ color: '#fff', fontSize: 9, fontWeight: 'bold' }}>今日</Text>
+                      </View>
+                    )}
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {hasRec ? (
+                      <View style={{ backgroundColor: `${C_MINT}20`, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+                        <Text style={{ color: C_MINT, fontSize: 10, fontWeight: 'bold' }}>有记录 📝</Text>
+                      </View>
+                    ) : (
+                      <Text style={{ color: '#BBB', fontSize: 10 }}>无记录</Text>
+                    )}
+                    {isSelected && (
+                      <Text style={{ color: C_PURPLE, fontSize: 14, fontWeight: 'bold' }}>✓</Text>
+                    )}
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+        </ScrollView>
+
+        <Pressable
+          onPress={() => onSelectDate(today)}
+          style={{
+            marginTop: 10,
+            backgroundColor: C_PURPLE,
+            borderRadius: 14,
+            paddingVertical: 11,
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: '#fff', fontSize: 13, fontWeight: 'bold' }}>
+            快速回到今日日报
+          </Text>
+        </Pressable>
+      </View>
+    </View>
+  );
 }
 
 // ── 编辑弹窗 ──────────────────────────────────────────────
@@ -361,14 +509,17 @@ function EditModal({
 }
 
 export default function StatsScreen() {
-  const router   = useRouter();
-  const [range, setRange]     = useState<RangeKey>('today');
-  const [records, setRecords] = useState<TimeRecord[]>([]);
-  const [allRecords, setAllRecords] = useState<TimeRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [editRecord, setEditRecord] = useState<TimeRecord | null>(null);
-  const [showEdit, setShowEdit] = useState(false);
-  const [recalcMsg, setRecalcMsg] = useState('');
+  const router       = useRouter();
+  const todayStrDate = toLocalDateStr(new Date());
+  const [range, setRange]               = useState<RangeKey>('today');
+  const [selectedDate, setSelectedDate] = useState<string>(todayStrDate);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [records, setRecords]           = useState<TimeRecord[]>([]);
+  const [allRecords, setAllRecords]     = useState<TimeRecord[]>([]);
+  const [loading, setLoading]           = useState(true);
+  const [editRecord, setEditRecord]     = useState<TimeRecord | null>(null);
+  const [showEdit, setShowEdit]         = useState(false);
+  const [recalcMsg, setRecalcMsg]       = useState('');
   const [rawTimerSecs, setRawTimerSecs] = useState<{ studySecs: number; slackSecs: number } | null>(null);
 
   const loadData = useCallback(async (r: RangeKey) => {
@@ -377,7 +528,7 @@ export default function StatsScreen() {
       const { start, end } = getRangeStartEnd(r);
       const [cur, all, raw] = await Promise.all([
         getRecordsInRange(start, end),
-        getRecordsInRange('2020-01-01', toDateStr(new Date())),
+        getRecordsInRange('2020-01-01', toLocalDateStr(new Date())),
         getTotalRawTimerSeconds(),
       ]);
       setRecords(cur);
@@ -390,6 +541,37 @@ export default function StatsScreen() {
   useFocusEffect(useCallback(() => { loadData(range); }, [loadData, range]));
 
   const handleRange = (r: RangeKey) => { setRange(r); loadData(r); };
+
+  // 选定日期的归档数据（若有匹配则取，否则为 null）
+  const selectedDateRec = useMemo(() => {
+    return allRecords.find(r => r.record_date === selectedDate) ?? null;
+  }, [allRecords, selectedDate]);
+
+  const isViewingToday = selectedDate === todayStrDate;
+  const canGoNextDay   = selectedDate < todayStrDate;
+
+  // 翻阅操作
+  const handlePrevDay = () => {
+    setSelectedDate(prev => addDays(prev, -1));
+  };
+
+  const handleNextDay = () => {
+    if (!canGoNextDay) return;
+    setSelectedDate(prev => {
+      const next = addDays(prev, 1);
+      return next > todayStrDate ? todayStrDate : next;
+    });
+  };
+
+  const handleBackToToday = () => {
+    setSelectedDate(todayStrDate);
+  };
+
+  const handleSelectDate = (date: string) => {
+    if (date > todayStrDate) return;
+    setSelectedDate(date);
+    setShowDatePicker(false);
+  };
 
   // 保存后触发增量重算（PRD 4.23）
   const handleSaved = useCallback(async (fromDate: string) => {
@@ -414,11 +596,16 @@ export default function StatsScreen() {
     setShowEdit(true);
   };
 
-  // 今日数据
-  const todayRec = records[0] ?? null;
-  const studyH   = todayRec ? +(effectiveStudyMinutes(todayRec) / 60).toFixed(1) : 0;
-  const slackH   = todayRec ? +(effectiveSlackMinutes(todayRec) / 60).toFixed(1) : 0;
-  const sleepH   = todayRec?.sleep_hours ?? 0;
+  // 查看指定日期的归档日报
+  const handleViewDayReport = (dateStr: string) => {
+    setSelectedDate(dateStr);
+    setRange('today');
+  };
+
+  // 日报数据（根据当前选定日期动态提取）
+  const studyH = selectedDateRec ? +(effectiveStudyMinutes(selectedDateRec) / 60).toFixed(1) : 0;
+  const slackH = selectedDateRec ? +(effectiveSlackMinutes(selectedDateRec) / 60).toFixed(1) : 0;
+  const sleepH = selectedDateRec?.sleep_hours ?? 0;
 
   // 累计统计
   const cumStudyH  = Math.round(allRecords.reduce((s, r) => s + r.study_minutes, 0) / 60 * 10) / 10;
@@ -441,6 +628,14 @@ export default function StatsScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: C_BG }}>
+      {/* 历史归档日期选择弹窗 */}
+      <DatePickerModal
+        visible={showDatePicker}
+        currentDate={selectedDate}
+        availableDates={allRecords.map(r => r.record_date)}
+        onClose={() => setShowDatePicker(false)}
+        onSelectDate={handleSelectDate}
+      />
       {/* 编辑弹窗（绝对定位浮层） */}
       <EditModal
         record={editRecord}
@@ -506,28 +701,119 @@ export default function StatsScreen() {
           ))}
         </View>
 
-        {/* ── 无数据状态 ── */}
-        {!hasData ? (
-          <View style={{ alignItems: 'center', paddingTop: 32, paddingHorizontal: 32 }}>
-            <Text style={{ fontSize: 72 }}>🍡</Text>
-            <Text style={{ color: C_TEXT, fontSize: 16, fontWeight: 'bold', marginTop: 16, textAlign: 'center' }}>
-              暂无数据
-            </Text>
-            <Text style={{ color: C_MUTED, fontSize: 13, textAlign: 'center', marginTop: 8, lineHeight: 20 }}>
-              先去摸鱼页面记一笔吧~{'\n'}数据是检验躺平的唯一标准 📝
-            </Text>
-          </View>
-        ) : range === 'today' ? (
-          // ── 今日饼图模式 ──
+        {/* ── 日报 / 趋势模式 ── */}
+        {range === 'today' ? (
+          // ── 日报与历史归档翻阅模式 ──
           <>
+            {/* 历史归档翻阅手账控制栏 */}
+            <View style={{
+              backgroundColor: C_CARD,
+              borderRadius: 18,
+              marginHorizontal: 16,
+              marginBottom: 14,
+              padding: 12,
+              borderWidth: 1.5,
+              borderColor: '#E8E4DA',
+              boxShadow: [{ offsetX: 0, offsetY: 2, blurRadius: 8, color: 'rgba(0,0,0,0.06)' }],
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                {/* 前一日按钮 */}
+                <Pressable
+                  onPress={handlePrevDay}
+                  style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: 12,
+                    backgroundColor: '#F5F2EA',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: 1,
+                    borderColor: '#DDD9D0',
+                  }}
+                >
+                  <Text style={{ fontSize: 20, color: C_TEXT, fontWeight: 'bold' }}>‹</Text>
+                </Pressable>
+
+                {/* 当前日期展示（点击打开日期归档选择器） */}
+                <Pressable
+                  onPress={() => setShowDatePicker(true)}
+                  style={{ flex: 1, alignItems: 'center', marginHorizontal: 8, paddingVertical: 4 }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={{ color: C_TEXT, fontSize: 15, fontWeight: 'bold' }}>
+                      {formatFullDate(selectedDate)}
+                    </Text>
+                    <Text style={{ fontSize: 13 }}>▾</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    {isViewingToday ? (
+                      <View style={{ backgroundColor: `${C_PINK}18`, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1 }}>
+                        <Text style={{ color: C_PINK, fontSize: 10, fontWeight: '700' }}>今日日报</Text>
+                      </View>
+                    ) : (
+                      <View style={{ backgroundColor: `${C_PURPLE}18`, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1 }}>
+                        <Text style={{ color: C_PURPLE, fontSize: 10, fontWeight: '700' }}>历史归档</Text>
+                      </View>
+                    )}
+                    <Text style={{ color: C_MUTED, fontSize: 10 }}>轻触切换日期</Text>
+                  </View>
+                </Pressable>
+
+                {/* 快捷回到今天或后一日按钮 */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  {!isViewingToday && (
+                    <Pressable
+                      onPress={handleBackToToday}
+                      style={{
+                        paddingHorizontal: 8,
+                        paddingVertical: 8,
+                        borderRadius: 10,
+                        backgroundColor: `${C_PURPLE}15`,
+                        borderWidth: 1,
+                        borderColor: C_PURPLE,
+                      }}
+                    >
+                      <Text style={{ color: C_PURPLE, fontSize: 11, fontWeight: 'bold' }}>今</Text>
+                    </Pressable>
+                  )}
+                  <Pressable
+                    onPress={handleNextDay}
+                    disabled={!canGoNextDay}
+                    style={{
+                      width: 38,
+                      height: 38,
+                      borderRadius: 12,
+                      backgroundColor: canGoNextDay ? '#F5F2EA' : '#FAF8F5',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      borderWidth: 1,
+                      borderColor: canGoNextDay ? '#DDD9D0' : '#EFECE6',
+                      opacity: canGoNextDay ? 1 : 0.4,
+                    }}
+                  >
+                    <Text style={{ fontSize: 20, color: canGoNextDay ? C_TEXT : '#BBB', fontWeight: 'bold' }}>›</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+
+            {/* 日报时间分布卡片 */}
             <View style={{
               backgroundColor: C_CARD, borderRadius: 20, marginHorizontal: 16,
               padding: 20, marginBottom: 14,
               boxShadow: [{ offsetX: 0, offsetY: 2, blurRadius: 12, color: 'rgba(0,0,0,0.07)' }],
             }}>
-              <Text style={{ color: C_MUTED, fontSize: 12, fontWeight: '600', marginBottom: 14 }}>
-                今日时间分布
-              </Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <Text style={{ color: C_MUTED, fontSize: 12, fontWeight: '600' }}>
+                  {isViewingToday ? '今日' : fmtDate(selectedDate)} 时间分布
+                </Text>
+                {!isViewingToday && (
+                  <Text style={{ color: C_PURPLE, fontSize: 11, fontWeight: '600' }}>
+                    归档快照
+                  </Text>
+                )}
+              </View>
+
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 20 }}>
                 {/* 饼图 */}
                 <PieChart studyH={studyH} slackH={slackH} sleepH={sleepH} />
@@ -548,7 +834,7 @@ export default function StatsScreen() {
               </View>
             </View>
 
-            {/* 今日幽默评价 */}
+            {/* 日报幽默评价 / 空状态 */}
             <View style={{
               marginHorizontal: 16, marginBottom: 14,
               backgroundColor: `${C_PURPLE}12`,
@@ -557,16 +843,28 @@ export default function StatsScreen() {
             }}>
               <Text style={{ color: C_PURPLE, fontSize: 12, lineHeight: 18 }}>
                 {studyH === 0 && slackH === 0 && sleepH === 0
-                  ? '今天还没有任何记录，先去摸鱼页面填一下数据吧~'
+                  ? (isViewingToday
+                    ? '今天还没有任何记录，先去摸鱼页面填一下数据吧~'
+                    : '该历史日期暂无专注与摸鱼记录，当时可能在专心生活~ 🌿')
                   : slackH > studyH
-                  ? `🐟 摸鱼 ${slackH}h > 学习 ${studyH}h，今天的主业是摸鱼吧？`
+                  ? `🐟 摸鱼 ${slackH}h > 学习 ${studyH}h，这一天的主业是摸鱼吧？`
                   : studyH > 3
-                  ? `📚 学习 ${studyH}h！今天的你是「战士」，好评！`
-                  : `今日学了 ${studyH}h，摸了 ${slackH}h，睡了 ${sleepH}h 🫡`
+                  ? `📚 学习 ${studyH}h！这天的你是「战士」，好评！`
+                  : `当日学了 ${studyH}h，摸了 ${slackH}h，睡了 ${sleepH}h 🫡`
                 }
               </Text>
             </View>
           </>
+        ) : !hasData ? (
+          <View style={{ alignItems: 'center', paddingTop: 32, paddingHorizontal: 32 }}>
+            <Text style={{ fontSize: 72 }}>🍡</Text>
+            <Text style={{ color: C_TEXT, fontSize: 16, fontWeight: 'bold', marginTop: 16, textAlign: 'center' }}>
+              暂无趋势数据
+            </Text>
+            <Text style={{ color: C_MUTED, fontSize: 13, textAlign: 'center', marginTop: 8, lineHeight: 20 }}>
+              先去摸鱼页面记一笔吧~{'\n'}数据是检验躺平的唯一标准 📝
+            </Text>
+          </View>
         ) : (
           // ── 本周/本月 分组条形图模式 ──
           <>
@@ -689,7 +987,8 @@ export default function StatsScreen() {
             </View>
             {/* 最近30天，按降序 */}
             {[...allRecords].reverse().slice(0, 30).map((r, idx, arr) => {
-              const isToday = r.record_date === toDateStr(new Date());
+              const isToday = r.record_date === todayStrDate;
+              const isSelectedInReport = r.record_date === selectedDate;
               const { window: editW } = getEditWindow(r.record_date);
               const isFrozen = editW === 'frozen';
               const isCold   = editW === 'cold';
@@ -699,30 +998,40 @@ export default function StatsScreen() {
               const dotColor = isFrozen ? '#CCCCCC' : isCold ? C_YELLOW : C_MINT;
 
               return (
-                <Pressable
+                <View
                   key={r.record_date}
-                  onPress={() => handleRowPress(r)}
                   style={{
                     flexDirection: 'row', alignItems: 'center',
                     paddingVertical: 9,
                     borderBottomWidth: idx < arr.length - 1 ? 1 : 0,
                     borderBottomColor: '#F5F2EE',
-                    backgroundColor: isToday ? `${C_PURPLE}08` : 'transparent',
-                    borderRadius: isToday ? 8 : 0,
+                    backgroundColor: isSelectedInReport ? `${C_PURPLE}12` : isToday ? `${C_PURPLE}08` : 'transparent',
+                    borderRadius: isSelectedInReport || isToday ? 8 : 0,
                     paddingHorizontal: 2,
-                    opacity: isFrozen ? 0.5 : 1,
+                    opacity: isFrozen ? 0.7 : 1,
                   }}
                 >
                   {/* 窗口期彩点 */}
                   <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: dotColor, marginRight: 6 }} />
-                  <View style={{ flex: 2.2 }}>
-                    <Text style={{ color: isToday ? C_PURPLE : isFrozen ? C_MUTED : C_TEXT, fontSize: 12, fontWeight: isToday ? '700' : '400' }}>
-                      {fmtDate(r.record_date)}{isToday ? ' 今' : ''}
-                    </Text>
+                  {/* 日期区域：点击可快速翻阅至该日期的日报 */}
+                  <Pressable
+                    onPress={() => handleViewDayReport(r.record_date)}
+                    style={{ flex: 2.2 }}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Text style={{
+                        color: isSelectedInReport ? C_PURPLE : isToday ? C_PURPLE : isFrozen ? C_MUTED : C_TEXT,
+                        fontSize: 12,
+                        fontWeight: isSelectedInReport || isToday ? '700' : '500',
+                      }}>
+                        {fmtDate(r.record_date)}{isToday ? ' 今' : ''}
+                      </Text>
+                      <Text style={{ color: C_PURPLE, fontSize: 10 }}>↗</Text>
+                    </View>
                     {isFrozen && (
                       <Text style={{ color: C_MUTED, fontSize: 9, marginTop: 1 }}>已冻结</Text>
                     )}
-                  </View>
+                  </Pressable>
                   <Text style={{ flex: 1.4, color: isHot ? COLORS.study : C_MUTED, fontSize: 12, fontWeight: '600', textAlign: 'center' }}>
                     {fmtH(effectiveStudyMinutes(r))}
                   </Text>
@@ -732,11 +1041,16 @@ export default function StatsScreen() {
                   <Text style={{ flex: 1.2, color: isFrozen ? C_MUTED : ((r.sleep_hours ?? 0) < 6 ? C_RED : COLORS.sleep), fontSize: 12, fontWeight: '600', textAlign: 'center' }}>
                     {r.sleep_hours ?? 0}h
                   </Text>
-                  {/* 可编辑图标 */}
-                  <Text style={{ flex: 0.5, color: isFrozen ? '#DDDDDD' : isCold ? C_YELLOW : C_MINT, fontSize: 13, textAlign: 'center' }}>
-                    {isFrozen ? '🔒' : '✏️'}
-                  </Text>
-                </Pressable>
+                  {/* 修改按钮（可编辑时点击弹窗） */}
+                  <Pressable
+                    onPress={() => handleRowPress(r)}
+                    style={{ flex: 0.5, alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    <Text style={{ color: isFrozen ? '#DDDDDD' : isCold ? C_YELLOW : C_MINT, fontSize: 13, textAlign: 'center' }}>
+                      {isFrozen ? '🔒' : '✏️'}
+                    </Text>
+                  </Pressable>
+                </View>
               );
             })}
 

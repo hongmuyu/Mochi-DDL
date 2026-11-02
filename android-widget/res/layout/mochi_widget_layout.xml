@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  麻糬のDDL Android 桌面小组件 Y2K 像素风布局
+  展示内容：当前最紧急待办 DDL、截止时间、待办总数
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:background="#FFFDF2">
+
+    <!-- 顶部标题与精灵状态 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="row"
+        android:gravity="center_vertical">
+        <TextView
+            android:id="@+id/widget_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="🍡 麻糬のDDL"
+            android:textColor="#6C63FF"
+            android:textStyle="bold"
+            android:textSize="14sp" />
+        <TextView
+            android:id="@+id/widget_count"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="待办: 0"
+            android:textColor="#FF5E7C"
+            android:textStyle="bold"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- 最紧急任务名称 -->
+    <TextView
+        android:id="@+id/widget_task_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="暂无临近截止的 DDL 🎉"
+        android:textColor="#333333"
+        android:textStyle="bold"
+        android:textSize="15sp"
+        android:maxLines="2"
+        android:ellipsize="end" />
+
+    <!-- 截止时间与倒计时 -->
+    <TextView
+        android:id="@+id/widget_task_deadline"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="点击进入应用查看全部"
+        android:textColor="#888888"
+        android:textSize="12sp" />
+
+</LinearLayout>
